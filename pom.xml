@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.example.aca</groupId>
+  <artifactId>aca-tcp</artifactId>
+  <version>1.0.0</version>
+  <packaging>pom</packaging>
+  <name>ACA TCP sample (aggregator)</name>
+
+  <!-- Convenience aggregator only: each app is self-contained and built on its own by its Dockerfile. -->
+  <modules>
+    <module>app-a</module>
+    <module>app-b</module>
+  </modules>
+</project>
