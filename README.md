@@ -21,7 +21,8 @@ client --HTTP GET /api/tcp?port=N--> app B (:8080) --TCP "Hello N, how are you?"
 .
 ├── pom.xml          親 POM (app-a / app-b をまとめてビルド)
 ├── app-a/           コンテナーアプリ A (Dockerfile: EXPOSE 18192 28192 38192)
-└── app-b/           コンテナーアプリ B (Dockerfile: EXPOSE 8080)
+├── app-b/           コンテナーアプリ B (Dockerfile: EXPOSE 8080)
+└── infra/           Azure Container Apps へデプロイする Bicep (main.bicep、main.bicepparam、modules/)
 ```
 
 ## 仕様
@@ -135,9 +136,194 @@ Bad Gateway: cannot talk to app-a:12345 (ConnectException: Connection refused (c
 
 イメージはマルチステージビルド (`maven:3-eclipse-temurin-25` でビルドし、`eclipse-temurin:25-jre` で実行) で、非 root (UID 10001) で動作します。
 
-## Azure Container Apps へデプロイする
+## Azure へデプロイする (Bicep)
 
-Microsoft Learn の記載に基づく手順の目安です。**ACA 環境へのデプロイ自体は、このリポジトリでは未検証です** (ローカルの Podman で、コンテナー同士の通信までを確認しています)。
+`infra/` の Bicep で、A と B を別々の VNET 上の Container Apps 環境にデプロイします。サブスクリプション スコープのテンプレートで、リソース グループも作成します。
+
+> **実環境へのデプロイと疎通確認は、まだ行っていません。** 確認済みなのは、`az bicep build` (警告なし)、`az deployment sub validate`、`az deployment sub what-if` (エラーなし) までです。Microsoft Learn に記載がなく、実環境での確認が必要な点は「[実環境で確認が必要な点](#実環境で確認が必要な点)」にまとめています。
+
+### 構成
+
+```text
+Internet
+   |  HTTPS
+   v
++--- VNET B (10.20.0.0/16) ------------------------------------------+
+|  snet-b  (10.20.0.0/24)                                            |
+|    ACA environment B (external)                                    |
+|      app-b : HTTP 8080                                             |
+|         |                                                          |
+|         |  TCP 18192 to the app-a FQDN                             |
+|         v                                                          |
+|  snet-pe (10.20.1.0/24)                                            |
+|    Private Endpoint   <-- Private DNS Zone (linked to VNET B)      |
++----------|---------------------------------------------------------+
+           |  Private Link
+           v
++--- VNET A (10.10.0.0/16) ------------------------------------------+
+|  snet-a  (10.10.0.0/24)                                            |
+|    ACA environment A (internal, public network access disabled)    |
+|      app-a : TCP 18192                                             |
++--------------------------------------------------------------------+
+
+Logs: both environments -> diagnostic settings -> Log Analytics workspace (Azure Monitor)
+```
+
+| | app-a | app-b |
+| --- | --- | --- |
+| VNET / サブネット | `10.10.0.0/16` / `10.10.0.0/24` | `10.20.0.0/16` / `10.20.0.0/24` (Private Endpoint 用に `10.20.1.0/24` も作成) |
+| Container Apps 環境 | 内部 (VNET 内からのみ到達可能)。Public network access は無効 | 外部 (インターネットから到達可能) |
+| Ingress | TCP `18192` (VNET 内のみ) | HTTP `8080` (インターネットから HTTPS で到達) |
+| スケール | 最小 1 / 最大 1 (スケール ルールなし) | 最小 1 / 最大 1 (スケール ルールなし) |
+| イメージ | `docker.io/anishi/acatcp:a_v1.0` | `docker.io/anishi/acatcp:b_v1.0` |
+| 環境変数 | なし | `TCP_SERVER_HOST` = A の FQDN (`app-a.<環境 A の既定ドメイン>`) |
+
+B は、A の FQDN を Private Endpoint 経由で名前解決し、A の `18192` へ TCP 接続します。Private DNS Zone は B の VNET にリンクしています。
+
+### 作成されるリソース
+
+`<suffix>` は `nameSuffix` です (既定はランダムな 6 文字)。名前はすべてパラメーターで変更できます。
+
+| リソース | 名前 (既定) | 備考 |
+| --- | --- | --- |
+| リソース グループ | `rg-acatcp-<suffix>` | 以下のリソースをすべて格納します |
+| Log Analytics ワークスペース | `log-acatcp-<suffix>` | ログの保存先 (Azure Monitor)。保持期間は 30 日 |
+| VNET A とサブネット | `vnet-a-<suffix>` / `snet-a-<suffix>` | サブネットは `Microsoft.App/environments` に委任します |
+| VNET B とサブネット | `vnet-b-<suffix>` / `snet-b-<suffix>`、`snet-pe-<suffix>` | `snet-pe` は Private Endpoint 用で、委任しません |
+| Container Apps 環境 A / B | `cae-a-<suffix>` / `cae-b-<suffix>` | ワークロード プロファイル環境 (Consumption)。ログの出力先は Azure Monitor |
+| コンテナー アプリ | `app-a` / `app-b` | 0.5 vCPU / 1 GiB |
+| Private Endpoint | `pe-app-a-<suffix>` | B の VNET から環境 A へ接続します (group ID `managedEnvironments`) |
+| Private DNS Zone | `privatelink.<リージョン>.azurecontainerapps.io` | B の VNET にリンクし、DNS ゾーン グループで A レコードを自動登録します |
+| 診断設定 | `send-to-log-analytics` (環境 A / B) | 全ログ (`allLogs`) を Log Analytics ワークスペースへ送ります |
+
+### 前提
+
+- Azure CLI と Bicep (`az bicep install`)。Azure CLI 2.90.0 / Bicep 0.49.2 で確認しています。
+- サブスクリプションに、リソース グループとリソースを作成できる権限 (サブスクリプション スコープのデプロイのため)。
+- リソース プロバイダー `Microsoft.App`、`Microsoft.Network`、`Microsoft.OperationalInsights`、`Microsoft.Insights` の登録 (`az provider register --namespace <名前>`)。
+- Docker Hub 上の `docker.io/anishi/acatcp:a_v1.0` と `b_v1.0`。両タグが存在し、どちらも `linux/amd64` であることを Docker Hub の API で確認しました。作り直す場合は、次のようにビルドして push します (Apple Silicon の Mac では `--platform linux/amd64` が必要です)。
+
+```bash
+podman build --platform linux/amd64 -t docker.io/anishi/acatcp:a_v1.0 app-a
+podman build --platform linux/amd64 -t docker.io/anishi/acatcp:b_v1.0 app-b
+podman login docker.io
+podman push docker.io/anishi/acatcp:a_v1.0
+podman push docker.io/anishi/acatcp:b_v1.0
+```
+
+### デプロイ
+
+```bash
+# 既定: 名前はランダム。リージョンは --location と同じ
+az deployment sub create --name acatcp --location japaneast --template-file infra/main.bicep
+
+# リージョンと名前を指定する場合
+az deployment sub create --name acatcp --location japaneast --template-file infra/main.bicep \
+  --parameters location=japaneast resourceGroupName=rg-acatcp \
+               appAVnetName=vnet-a appASubnetName=snet-a appBVnetName=vnet-b appBSubnetName=snet-b
+
+# パラメーター ファイルを使う場合 (infra/main.bicepparam。--template-file は不要です)
+az deployment sub create --name acatcp --location japaneast --parameters infra/main.bicepparam
+```
+
+`--location` はデプロイの管理情報の保存先です。`location` パラメーターを省略すると、リソースのリージョンにも使われます。
+
+デプロイが終わったら、出力から B の URL を取り出して呼び出します。すべて想定どおりに動けば、次のような応答になります (実環境では未確認です)。
+
+```bash
+az deployment sub show --name acatcp --query properties.outputs
+curl "$(az deployment sub show --name acatcp --query properties.outputs.appBUrl.value -o tsv)"
+# Acknowledged Hello 18192, how are you?. This message is sent from 18192!
+```
+
+デプロイ前の確認 (`what-if`) は、`nameSuffix` を固定して実行します (理由は次の節を参照)。
+
+```bash
+az deployment sub what-if --name acatcp --location japaneast --template-file infra/main.bicep --parameters nameSuffix=abc123
+```
+
+不要になったら、リソース グループごと削除します。
+
+```bash
+az group delete --name "$(az deployment sub show --name acatcp --query properties.outputs.resourceGroupName.value -o tsv)"
+```
+
+### パラメーター
+
+すべて省略できます。名前の既定値は、`nameSuffix` を付けたものです。
+
+| パラメーター | 既定値 | 説明 |
+| --- | --- | --- |
+| `location` | `--location` の値 | リソースのリージョン |
+| `nameSuffix` | ランダムな 6 文字 (`newGuid()` から生成) | 既定の名前に付ける文字列 (3〜12 文字) |
+| `resourceGroupName` | `rg-acatcp-<nameSuffix>` | リソース グループ名 |
+| `appAVnetName` | `vnet-a-<nameSuffix>` | app-a の VNET 名 |
+| `appASubnetName` | `snet-a-<nameSuffix>` | app-a の環境用サブネット名 |
+| `appBVnetName` | `vnet-b-<nameSuffix>` | app-b の VNET 名 |
+| `appBSubnetName` | `snet-b-<nameSuffix>` | app-b の環境用サブネット名 |
+| `appBPrivateEndpointSubnetName` | `snet-pe-<nameSuffix>` | Private Endpoint 用サブネット名 (B の VNET 内) |
+| `appAVnetAddressPrefix` | `10.10.0.0/16` | app-a の VNET のアドレス空間。サブネットは先頭の `/24` を使います |
+| `appBVnetAddressPrefix` | `10.20.0.0/16` | app-b の VNET のアドレス空間 (A の VNET と重ならないこと)。環境用サブネットは先頭の `/24`、Private Endpoint 用は 2 番目の `/24` |
+| `appAImage` / `appBImage` | `docker.io/anishi/acatcp:a_v1.0` / `:b_v1.0` | コンテナー イメージ |
+| `tags` | `{}` | すべてのリソースに付けるタグ |
+
+- **名前をランダムにしている理由**: Log Analytics ワークスペースは、削除してから 14 日間は同じ名前を使えません (論理削除)。名前が固定だと、リソース グループの削除直後に、同じ名前で再デプロイできなくなるためです。
+- **再デプロイ**: 既定のままだと、デプロイのたびに別の名前で新しい一式が作られます。同じリソースを更新するときは、前回の出力 `nameSuffix` (または各名前のパラメーター) を指定してください。
+- **`what-if`**: `newGuid()` から生成した名前のリソースは、`what-if` で評価できません (`Unsupported`)。`nameSuffix` か各名前を指定したときに、内容を確認できます。
+
+### ログ (Azure Monitor)
+
+- 両方の環境で、ログの出力先 (`appLogsConfiguration.destination`) を `azure-monitor` にしています。環境ごとに診断設定 `send-to-log-analytics` を作成し、全ログ (`allLogs`) を、同じリソース グループ内の Log Analytics ワークスペース (`log-acatcp-<suffix>`) へ送ります。
+- アプリの標準出力 / 標準エラーは `ContainerAppConsoleLogs`、システム ログは `ContainerAppSystemLogs` テーブルに入ります。ワークスペースの **ログ** で、たとえば次のクエリを実行します。
+
+```kusto
+ContainerAppConsoleLogs
+| where ContainerAppName in ("app-a", "app-b")
+| project TimeGenerated, ContainerAppName, Log
+| order by TimeGenerated desc
+```
+
+- 診断設定を作ってからログが届くまで、最大 90 分かかることがあります。テーブルは、最初のログが届いたときに作られます ([Diagnostic settings in Azure Monitor](https://learn.microsoft.com/azure/azure-monitor/platform/diagnostic-settings))。
+
+### 実環境で確認が必要な点
+
+次の点は Microsoft Learn に記載がなく、実環境での PoC (または、サポート リクエストでの確認) が必要です。
+
+1. **Private Endpoint 経由で、TCP `18192` が通るか**
+
+   Learn の Private Endpoint の手順 ([Use a private endpoint with an Azure Container Apps environment](https://learn.microsoft.com/azure/container-apps/how-to-use-private-endpoint)) は、HTTP のアプリを例にしています。HTTP 以外の TCP ingress を、Private Endpoint 経由で受けられるかは明記されていません。B の VNET 内の VM などから `nc -vz app-a.<環境 A の既定ドメイン> 18192` を実行するか、`curl "https://<B の FQDN>/api/tcp?port=18192"` が 200 を返すかで確認します。通らない場合は、2 つの VNET のピアリングへ切り替えます。このとき Private DNS Zone は、環境 A の既定ドメインと同名のゾーンに、環境 A の静的 IP を指す `*` の A レコードを置く形になります。
+
+2. **名前解決**
+
+   Learn の手順では、`app-a.<既定ドメイン>` が公開 DNS の CNAME で `<既定ドメインの先頭ラベル>.privatelink.<リージョン>.azurecontainerapps.io` に解決され、Private DNS Zone の A レコード (Private Endpoint の IP) に行き着きます。B の VNET から `nslookup app-a.<環境 A の既定ドメイン>` を実行し、Private Endpoint の IP (`10.20.1.x`) が返るか確認してください。
+
+   Learn の手順は、DNS ゾーン グループではなく A レコードを手動で追加しています。この Bicep は、DNS ゾーン グループによる A レコードの自動登録に任せていますが、期待どおりに登録されるかは未確認です。登録されていない場合は、次のように追加します (`<RG>` と `<suffix>` は読み替えてください)。
+
+   ```bash
+   PE_IP=$(az network private-endpoint show --resource-group <RG> --name pe-app-a-<suffix> \
+     --query 'customDnsConfigs[0].ipAddresses[0]' --output tsv)
+   RECORD=$(az containerapp env show --resource-group <RG> --name cae-a-<suffix> \
+     --query properties.defaultDomain --output tsv | sed 's/\..*//')
+   az network private-dns record-set a add-record --resource-group <RG> \
+     --zone-name privatelink.<リージョン>.azurecontainerapps.io \
+     --record-set-name "$RECORD" --ipv4-address "$PE_IP"
+   ```
+
+3. **A がインターネットから到達できないこと**
+
+   A の ingress は、別の環境にいる B から呼ぶために `external: true` にしています (`false` だと同じ環境内からしか呼べません)。環境 A は内部環境のため、到達できるのは VNET 内 (Private Endpoint 経由を含む) のはずです。インターネット側から接続できないことも、あわせて確認してください。
+
+### 補足
+
+- **A が公開するのは `18192` だけ**です (仕様どおり)。B に `port=28192` や `38192` を指定すると、A に到達できず 502 / 504 になります。これらも使う場合は、`infra/modules/container-app.bicep` の ingress に `additionalPortMappings` を追加します (書式は、後述の `app-a.yaml` を参照)。
+- **Private Endpoint 用サブネット**: 委任 (`Microsoft.App/environments`) 済みのサブネットには Private Endpoint を置けないため、B の VNET には、環境用とは別に `/24` のサブネットをもう 1 つ作っています。
+- **追加で作られるリソースと費用**: ACA は、環境ごとに管理用のリソース グループ (名前は `ME_` で始まります) を作り、Standard のロード バランサー (外部環境は ingress 用のパブリック IP も) を置きます。egress 用の Standard の静的パブリック IP も含めて、Container Apps の料金とは別に課金されます ([Managed resources](https://learn.microsoft.com/azure/container-apps/custom-virtual-networks#managed-resources))。Private Endpoint にも追加料金があります。管理用のリソース グループは変更しないでください。
+- **Docker Hub の匿名プル**: 回数制限があります。デプロイが失敗したり、リビジョンが起動しなかったりするときは、プル エラーでないかを確認してください。
+- **NSG は作成していません**。必要に応じて追加してください。
+
+## 参考: Azure CLI で 1 つの環境にデプロイする
+
+上の Bicep の構成とは別に、A と B を同じ Container Apps 環境に置く場合の、`az containerapp` による手順の目安です。Microsoft Learn の記載に基づくもので、**ACA 環境へのデプロイ自体は、このリポジトリでは未検証です** (ローカルの Podman で、コンテナー同士の通信までを確認しています)。
 
 ### 押さえておく点
 
@@ -228,7 +414,12 @@ az containerapp create \
 | `podman inspect` | A の ExposedPorts は 18192 / 28192 / 38192、B は 8080 |
 | `SIGTERM` での停止 | 終了コード 143 で正常終了 (`podman stop` は約 0.4 秒) |
 | `podman build --platform linux/amd64` (A) と起動 | Apple Silicon 上でビルド・起動とも成功 |
-| ACA 環境へのデプロイ | 未実施 |
+| `az bicep build` (`infra/main.bicep`、各モジュール) と `az bicep build-params` (`main.bicepparam`) | エラー・警告なし |
+| `az deployment sub validate` (`infra/main.bicep`) | 成功 |
+| `az deployment sub what-if` (`nameSuffix` 固定) | エラーなし。作成されるリソースはすべて `Create` |
+| Docker Hub の `anishi/acatcp` | `a_v1.0` / `b_v1.0` の両タグが存在し、どちらも `linux/amd64` |
+| Bicep の実デプロイ、Private Endpoint 経由の TCP 疎通 | 未実施 (「実環境で確認が必要な点」を参照) |
+| ACA 環境へのデプロイ (`az containerapp`) | 未実施 |
 
 ## 補足
 
