@@ -18,9 +18,8 @@ public final class Main {
         System.setProperty(LOG_FORMAT_KEY,
                 System.getProperty(LOG_FORMAT_KEY, "%1$tFT%1$tT.%1$tL%1$tz %4$-7s [%3$s] %5$s%6$s%n"));
 
-        try (var server = EchoServer.start(PORTS, IDLE_TIMEOUT)) {
-            // The accept threads are non-daemon, so the JVM stays up after main returns.
-            Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().name("shutdown").unstarted(server::close));
-        }
+        var server = EchoServer.start(PORTS, IDLE_TIMEOUT);
+        // The accept threads are non-daemon, so the JVM stays up after main returns.
+        Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().name("shutdown").unstarted(server::close));
     }
 }

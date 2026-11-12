@@ -6,7 +6,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.time.Duration;
+
+import jakarta.inject.Singleton;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
@@ -16,7 +17,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
  * <p>The client never half-closes its side of the connection. It just closes the socket after the reply, which keeps
  * it compatible with TCP proxies that treat a half-close as the end of the whole connection.
  */
-final class TcpLineClient {
+@Singleton
+public final class TcpLineClient {
 
     static final int MAX_REPLY_BYTES = 8 * 1024;
 
@@ -24,10 +26,10 @@ final class TcpLineClient {
     private final int connectTimeoutMillis;
     private final int readTimeoutMillis;
 
-    TcpLineClient(String host, Duration connectTimeout, Duration readTimeout) {
-        this.host = host;
-        this.connectTimeoutMillis = Math.toIntExact(connectTimeout.toMillis());
-        this.readTimeoutMillis = Math.toIntExact(readTimeout.toMillis());
+    public TcpLineClient(AppConfig config) {
+        this.host = config.host();
+        this.connectTimeoutMillis = Math.toIntExact(config.connectTimeout().toMillis());
+        this.readTimeoutMillis = Math.toIntExact(config.readTimeout().toMillis());
     }
 
     String host() {

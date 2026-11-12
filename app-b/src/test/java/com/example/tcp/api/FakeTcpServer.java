@@ -21,20 +21,26 @@ final class FakeTcpServer implements AutoCloseable {
     private final BlockingQueue<String> requests = new LinkedBlockingQueue<>();
     private final List<Socket> connections = new CopyOnWriteArrayList<>();
     private final UnaryOperator<String> responder;
+    private final boolean waitForClientClose;
 
-    /** @param responder maps a request line to the reply line; returning null leaves the request unanswered */
-    private FakeTcpServer(UnaryOperator<String> responder) throws IOException {
+    private FakeTcpServer(UnaryOperator<String> responder, boolean waitForClientClose) throws IOException {
         this.responder = responder;
+        this.waitForClientClose = waitForClientClose;
         Thread.startVirtualThread(this::acceptLoop);
     }
 
     static FakeTcpServer replying() throws IOException {
-        return new FakeTcpServer(line -> "reply to: " + line);
+        return replying(line -> "reply to: " + line);
+    }
+
+    /** A null reply closes the connection without sending a line. */
+    static FakeTcpServer replying(UnaryOperator<String> responder) throws IOException {
+        return new FakeTcpServer(responder, false);
     }
 
     /** Accepts connections and reads the request but never answers, so clients run into their read timeout. */
     static FakeTcpServer silent() throws IOException {
-        return new FakeTcpServer(_ -> null);
+        return new FakeTcpServer(_ -> null, true);
     }
 
     int port() {
@@ -75,7 +81,7 @@ final class FakeTcpServer implements AutoCloseable {
             var reply = responder.apply(line);
             if (reply != null) {
                 socket.getOutputStream().write((reply + "\n").getBytes(UTF_8));
-            } else {
+            } else if (waitForClientClose) {
                 reader.readLine();
             }
         } catch (IOException _) {

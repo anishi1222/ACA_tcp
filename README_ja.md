@@ -13,7 +13,7 @@ client --HTTP GET /api/tcp?port=N--> app B (:8080) --TCP "Hello N, how are you?"
        <------- 200 + reply --------             <-- "Acknowledged ... sent from N!" --
 ```
 
-実行時の外部ライブラリはありません (JDK 標準ライブラリのみ。`jdk.httpserver` と仮想スレッドを使用)。JUnit はテストでのみ使用します。
+A は JDK 標準ライブラリと仮想スレッドのみを使用します。B は Micronaut 5 HTTP Server (Netty) とコンパイル時の依存性注入を使用します。ブロッキング TCP 処理は Netty のイベントループではなく、Micronaut の blocking executor (Java 25 では仮想スレッド) 上で実行します。JUnit はテストでのみ使用します。
 
 ## ディレクトリ構成
 
@@ -46,6 +46,7 @@ Acknowledged Hello This message is sent from 28192!
 
 ### コンテナーアプリ B
 
+- Micronaut の Controller を使用し、HTTP サーバーの設定は `app-b/src/main/resources/application.properties` に定義しています。起動とグレースフルシャットダウンは Micronaut が管理します。
 - HTTP `8080` で待ち受け、コンテキストパスは `/api/tcp` です (`/api/tcp/` も可)。
 - `GET /api/tcp?port={ポート番号}` を受けると、A の `{ポート番号}` へ TCP 接続して `Hello {ポート番号}, how are you?` を送信し、A の応答を本文 (`text/plain; charset=utf-8`) として返します。
 - 送信先ホスト名は環境変数で指定します。TCP 接続のタイムアウトは、接続 3 秒、応答待ち 5 秒です。
@@ -79,7 +80,7 @@ export JAVA_HOME=/path/to/jdk-25
 mvn -B -ntp clean verify
 ```
 
-`app-a/target/app.jar` と `app-b/target/app.jar` が生成されます。テストでは、A の echo 動作 (3 ポート、複数行、CRLF、接続だけして切断するクライアントなど) と、B のクエリ検証、ステータス変換、TCP クライアントを検証します。
+`app-a/target/app.jar` と `app-b/target/app.jar` が生成されます。B の実行可能 JAR には実行時の依存ライブラリを含めるため、既存の Dockerfile と `java -jar` コマンドはそのまま利用できます。テストでは、A の echo 動作 (3 ポート、複数行、CRLF、接続だけして切断するクライアントなど) と、B の Micronaut 設定、クエリ検証、ステータス変換、TCP クライアントを検証します。
 
 ## ローカルで実行する (jar)
 

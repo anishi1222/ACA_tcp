@@ -13,7 +13,7 @@ client --HTTP GET /api/tcp?port=N--> app B (:8080) --TCP "Hello N, how are you?"
        <------- 200 + reply --------             <-- "Acknowledged ... sent from N!" --
 ```
 
-There are no runtime dependencies beyond the JDK standard libraries (`jdk.httpserver` and virtual threads are used). JUnit is used for tests only.
+App A uses only JDK standard libraries and virtual threads. App B uses Micronaut 5 HTTP Server (Netty) with compile-time dependency injection; blocking TCP calls run on Micronaut's blocking executor (virtual threads on Java 25), not on the Netty event loop. JUnit is used for tests only.
 
 ## Directory structure
 
@@ -46,6 +46,7 @@ Acknowledged Hello This message is sent from 28192!
 
 ### Container app B
 
+- Uses a Micronaut controller, with server settings in `app-b/src/main/resources/application.properties`. Micronaut manages startup and graceful shutdown.
 - Listens on HTTP `8080` with the context path `/api/tcp` (`/api/tcp/` is also accepted).
 - For `GET /api/tcp?port={port}`, it connects to app A on `{port}`, sends `Hello {port}, how are you?`, and returns app A's reply as the response body (`text/plain; charset=utf-8`).
 - The destination hostname is set with an environment variable. The TCP connection timeout is 3 seconds, and the reply timeout is 5 seconds.
@@ -79,7 +80,7 @@ export JAVA_HOME=/path/to/jdk-25
 mvn -B -ntp clean verify
 ```
 
-This creates `app-a/target/app.jar` and `app-b/target/app.jar`. Tests cover app A's echo behaviour (three ports, multiple lines, CRLF and clients that connect and then disconnect, among other cases), and app B's query validation, status mapping and TCP client.
+This creates `app-a/target/app.jar` and `app-b/target/app.jar`. App B's executable JAR includes its runtime dependencies, so the existing Dockerfile and `java -jar` commands work unchanged. Tests cover app A's echo behaviour (three ports, multiple lines, CRLF and clients that connect and then disconnect, among other cases), and app B's Micronaut configuration, query validation, status mapping and TCP client.
 
 ## Run locally (JAR)
 
