@@ -499,7 +499,7 @@ For VNet address spaces (`appAVnetAddressPrefix` / `appBVnetAddressPrefix`) and 
 
 ## Automatic deployment (GitHub Actions)
 
-`.github/workflows/azure-dev.yml` runs tests, provisioning, image builds, pushes to ACR and deployments to Container Apps (which pull from ACR) automatically when changes are pushed to `main`. Builds run with ACR Tasks, so Docker is not needed on the runner. Azure sign-in uses OpenID Connect (federated credentials); no secrets are used.
+`.github/workflows/azure-dev.yml` runs tests, provisioning, image builds, pushes to ACR and deployments to Container Apps (which pull from ACR) automatically when changes are pushed to `main`. Builds run with ACR Tasks, so Docker is not needed on the runner. Deployment settings are read from GitHub Actions repository secrets. Azure sign-in still uses OpenID Connect (federated credentials); no client secret is needed.
 
 | Trigger | What runs |
 | --- | --- |
@@ -510,7 +510,7 @@ For VNet address spaces (`appAVnetAddressPrefix` / `appBVnetAddressPrefix`) and 
 The steps run in this order. Deployments run one at a time to avoid concurrent deployments to the same environment.
 
 1. `test` job: runs `mvn -B -ntp verify` with Java 25 (Temurin).
-2. `deploy` job (only after `test` succeeds, and only on `main`): loads repository variables (`AZURE_*`). It reports an error if required variables are missing.
+2. `deploy` job (only after `test` succeeds, and only on `main`): loads deployment secrets (`AZURE_*`). It reports an error if required secrets are missing.
 3. Signs in to Azure with `azd auth login` using federated credentials.
 4. `azd provision --no-prompt`: applies the contents of `infra/`. Existing apps keep their current (ACR) images.
 5. `azd deploy --no-prompt`: builds with ACR Tasks, pushes to ACR and creates new revisions in Container Apps (the apps pull from ACR with the managed identity).
@@ -528,33 +528,40 @@ azd env new acatcp-dev --location japaneast
 
 # Create the Azure identity (service principal and federated credentials) and GitHub repository variables
 azd pipeline config
+
+# Copy the corresponding values from Actions > Variables into repository secrets (interactive prompts)
+gh secret set AZURE_CLIENT_ID
+gh secret set AZURE_TENANT_ID
+gh secret set AZURE_SUBSCRIPTION_ID
+gh secret set AZURE_ENV_NAME
+gh secret set AZURE_LOCATION
 ```
 
 Based on the azd 1.37.3 source, `azd pipeline config` does the following (it has not been run):
 
 - Registers an app (service principal) in Microsoft Entra ID and, by default, assigns the `Contributor` and `User Access Administrator` roles at subscription scope. `User Access Administrator` is needed for Bicep to create the `AcrPull` role assignment. To limit permissions, specify roles with `--principal-role`; permission to write role assignments is still required.
 - Creates federated credentials for pull requests, the current branch and `main`.
-- Sets GitHub repository variables (see the table below).
+- Sets GitHub repository variables. This workflow does not read them; copy their values into the corresponding repository secrets as shown above.
 - Does not generate a workflow because `.github/workflows/azure-dev.yml` already exists.
 
-Once a commit containing the workflow is on `main`, a push to `main` starts automatic deployment (`azd pipeline config` may offer to commit and push).
+Register the required secrets before pushing the workflow to `main`. Once a commit containing the workflow is on `main`, a push to `main` starts automatic deployment (`azd pipeline config` may offer to commit and push).
 
-### Repository variables
+### Repository secrets
 
-`azd pipeline config` sets these as repository variables, not secrets (Settings → Secrets and variables → Actions → Variables).
+Register these under Settings → Secrets and variables → Actions → Secrets → New repository secret, or use `gh secret set <name>` to enter a value interactively. `azd pipeline config` creates variables, not secrets, so an existing Variables entry alone is not sufficient.
 
-| Variable | Description |
+| Secret | Description |
 | --- | --- |
 | `AZURE_CLIENT_ID` (required) | Client ID of the created service principal |
 | `AZURE_TENANT_ID` (required) | Entra tenant ID |
 | `AZURE_SUBSCRIPTION_ID` (required) | Target subscription |
 | `AZURE_ENV_NAME` (required) | azd environment name |
 | `AZURE_LOCATION` (required) | Region |
-| `AZURE_RESOURCE_GROUP`, `AZURE_APP_A_VNET_NAME`, etc. (optional) | Environment variables from [Set names and other values](#set-names-and-other-values). They are set only when the azd environment has a value. Unset values use the defaults (names that look random) |
+| `AZURE_RESOURCE_GROUP`, `AZURE_APP_A_VNET_NAME`, etc. (optional) | Register the environment variables from [Set names and other values](#set-names-and-other-values) as same-named secrets only when overriding a default. Unset values use the defaults (names that look random) |
 
-If any of the five required variables is missing, the workflow stops with an error asking you to run `azd pipeline config`. This happened when `main` was pushed with no variables set: the `test` job succeeded, and the `deploy` job stopped at `Load repository variables` because all five were missing (it did not connect to Azure; later steps were skipped). Until you run `azd pipeline config`, every push to `main` will have the same result.
+If any of the five required secrets is missing, `Load deployment secrets` stops with an error naming the missing secret before signing in to Azure. Existing repository variables are not used as a fallback.
 
-The workflow passes only repository variables with values whose names start with `AZURE_` to azd. An empty value overrides the Bicep default instead of using it (`azd provision --preview` with an empty `AZURE_NAME_SUFFIX` failed because `nameSuffix` must have at least three characters). To change a name later, use `gh variable set <name> --body <value>`, but changing it after the first provision creates different resources.
+The workflow explicitly references only the deployment secrets listed in `azure-dev.yml`, not all repository secrets. It passes only non-empty values to azd and rejects values containing line breaks. An empty value would override the Bicep default instead of using it (`azd provision --preview` with an empty `AZURE_NAME_SUFFIX` failed because `nameSuffix` must have at least three characters). To change a value later, use `gh secret set <name>`, but changing resource names after the first provision creates different resources. If you add a new deployment setting, also add its secret reference to the workflow.
 
 ### Notes (automatic deployment)
 
@@ -564,7 +571,7 @@ The workflow passes only repository variables with values whose names start with
 
 ### Items to verify for automatic deployment in a live environment
 
-- Running `azd pipeline config`, signing in to azd from GitHub Actions with federated credentials, and running `azd provision` / `azd deploy` from the workflow have not been done in this repository. Checks so far include `actionlint`, a local test of the repository-variable loading step, and a GitHub run where the `test` job succeeded and the `deploy` job stopped because variables were missing.
+- Running `azd pipeline config`, signing in to azd from GitHub Actions with federated credentials, and running `azd provision` / `azd deploy` from the workflow have not been done in this repository. The secrets-based workflow still needs a GitHub Actions run. Before the secrets migration, a GitHub run reached the missing-variable check after the `test` job succeeded.
 - `azd pipeline config` is a beta feature in azd 1.37.3. It needs permission to register an app in Entra ID and assign roles in the subscription (for example, Owner).
 - The service principal's default subscription roles (`Contributor` and `User Access Administrator`) are broad. Consider limiting the scope for production use.
 - On the first deployment, the apps start with the bootstrap image because ACR has no app images yet (see item 4 under [Items to verify in a live environment](#items-to-verify-in-a-live-environment)). If `azd provision` fails, `azd deploy` does not run.
@@ -672,11 +679,11 @@ After deployment, call `https://<app B FQDN>/api/tcp?port=28192`. HTTP ingress t
 | JSON schema validation for `azure.yaml` | No errors |
 | Search for `docker.io` and `Docker Hub` in `infra/`, `azure.yaml`, `.github/` and Dockerfiles | No container app image references (only explanatory text and comments) |
 | `actionlint` (`.github/workflows/azure-dev.yml`) | No errors |
-| Run the workflow's "Load repository variables" step locally | Errors when required values are missing; exports only `AZURE_*` values that are set |
+| Run the workflow's "Load deployment secrets" step locally | Errors when required secrets are missing or values contain line breaks; exports only configured, non-empty deployment settings |
 | `azd provision --preview` with an empty `AZURE_NAME_SUFFIX` | Error because `nameSuffix` must be at least three characters (evidence that an empty value must not be passed) |
 | Live Bicep deployment and TCP connectivity through the Private Endpoint | Not done (see [Items to verify in a live environment](#items-to-verify-in-a-live-environment)) |
 | `azd up` / `azd deploy` / `azd down`, ACR push and ACR pull | Not done (see [Items to verify with azd in a live environment](#items-to-verify-with-azd-in-a-live-environment)) |
-| GitHub Actions run (push to `main`, repository variables unset) | The `test` job (Java 25, `mvn -B -ntp verify`) succeeded. The `deploy` job stopped at `Load repository variables` because the five required variables were missing (expected; no Azure connection was made and later steps were skipped) |
+| GitHub Actions run before the secrets migration (push to `main`, repository variables unset) | The `test` job (Java 25, `mvn -B -ntp verify`) succeeded. The `deploy` job stopped at `Load repository variables` because the five required variables were missing (expected; no Azure connection was made and later steps were skipped). The secrets-based workflow has not been run on GitHub yet |
 | `azd pipeline config`, `azd auth login` with federated credentials, and workflow `azd provision` / `azd deploy` | Not done (see [Items to verify for automatic deployment in a live environment](#items-to-verify-for-automatic-deployment-in-a-live-environment)) |
 | Deployment to an ACA environment (`az containerapp`) | Not done |
 

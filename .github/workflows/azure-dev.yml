@@ -7,11 +7,11 @@
 # そのイメージで Container Apps の新しいリビジョンを作ります (アプリはマネージド ID で ACR から pull します)。
 # ビルドは ACR 上で行うため、ランナーに Docker は要りません。
 #
-# Azure へのログインは OpenID Connect (フェデレーション資格情報) で行い、シークレットは使いません。
+# Azure へのログインは OpenID Connect (フェデレーション資格情報) で行い、クライアントシークレットは使いません。
 # 初回に 1 度だけ、ローカルで azd pipeline config を実行します (README の「自動デプロイ」を参照)。
-# これが Azure 側の ID と、次のリポジトリ変数を作ります。
+# Azure 側の ID を作成した後、次の値を GitHub Actions のリポジトリシークレットに登録します。
 #   AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID / AZURE_ENV_NAME / AZURE_LOCATION
-# 値のある AZURE_ 始まりのリポジトリ変数 (例: AZURE_RESOURCE_GROUP) は、そのまま azd に渡します。
+# 下記で参照するシークレットのうち、値のあるものだけを azd に渡します。
 name: azure-dev
 
 on:
@@ -70,26 +70,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # 値のあるリポジトリ変数 (AZURE_*) だけを環境変数にします。
+      # デプロイに必要なシークレットだけを参照し、値のあるものだけを環境変数にします。
       # 未設定の変数を env: に並べると空文字で渡り、Bicep の既定値 (名前の自動生成など) が使われなくなるためです。
-      - name: Load repository variables
+      - name: Load deployment secrets
         env:
-          REPO_VARS: ${{ toJSON(vars) }}
+          DEPLOYMENT_SECRETS: |
+            {
+              "AZURE_CLIENT_ID": ${{ toJSON(secrets.AZURE_CLIENT_ID) }},
+              "AZURE_TENANT_ID": ${{ toJSON(secrets.AZURE_TENANT_ID) }},
+              "AZURE_SUBSCRIPTION_ID": ${{ toJSON(secrets.AZURE_SUBSCRIPTION_ID) }},
+              "AZURE_ENV_NAME": ${{ toJSON(secrets.AZURE_ENV_NAME) }},
+              "AZURE_LOCATION": ${{ toJSON(secrets.AZURE_LOCATION) }},
+              "AZURE_RESOURCE_GROUP": ${{ toJSON(secrets.AZURE_RESOURCE_GROUP) }},
+              "AZURE_APP_A_VNET_NAME": ${{ toJSON(secrets.AZURE_APP_A_VNET_NAME) }},
+              "AZURE_APP_A_SUBNET_NAME": ${{ toJSON(secrets.AZURE_APP_A_SUBNET_NAME) }},
+              "AZURE_APP_B_VNET_NAME": ${{ toJSON(secrets.AZURE_APP_B_VNET_NAME) }},
+              "AZURE_APP_B_SUBNET_NAME": ${{ toJSON(secrets.AZURE_APP_B_SUBNET_NAME) }},
+              "AZURE_APP_B_PE_SUBNET_NAME": ${{ toJSON(secrets.AZURE_APP_B_PE_SUBNET_NAME) }},
+              "AZURE_NAME_SUFFIX": ${{ toJSON(secrets.AZURE_NAME_SUFFIX) }},
+              "AZURE_CONTAINER_REGISTRY_NAME": ${{ toJSON(secrets.AZURE_CONTAINER_REGISTRY_NAME) }},
+              "AZURE_APP_A_IMAGE": ${{ toJSON(secrets.AZURE_APP_A_IMAGE) }},
+              "AZURE_APP_B_IMAGE": ${{ toJSON(secrets.AZURE_APP_B_IMAGE) }}
+            }
         run: |
           missing=0
           for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_ENV_NAME AZURE_LOCATION; do
-            if ! jq -e --arg name "$name" '(.[$name] // "") != ""' <<<"$REPO_VARS" >/dev/null; then
-              echo "::error::リポジトリ変数 ${name} が未設定です。ローカルで azd pipeline config を実行してください (README の「自動デプロイ」を参照)。"
+            if ! jq -e --arg name "$name" '(.[$name] // "") != ""' <<<"$DEPLOYMENT_SECRETS" >/dev/null; then
+              echo "::error::GitHub Actions のリポジトリシークレット ${name} が未設定です。Settings → Secrets and variables → Actions → Secrets に登録してください (README の「自動デプロイ」を参照)。"
               missing=1
             fi
           done
           if [ "$missing" -ne 0 ]; then
             exit 1
           fi
+          if jq -e 'any(.[]; contains("\n") or contains("\r"))' <<<"$DEPLOYMENT_SECRETS" >/dev/null; then
+            echo "::error::Azure 用のシークレットは改行を含まない値で設定してください。"
+            exit 1
+          fi
           jq -r 'to_entries[]
             | select(.key | startswith("AZURE_"))
-            | select(.value != "" and (.value | contains("\n") | not))
-            | "\(.key)=\(.value)"' <<<"$REPO_VARS" >> "$GITHUB_ENV"
+            | select(.value != "")
+            | "\(.key)=\(.value)"' <<<"$DEPLOYMENT_SECRETS" >> "$GITHUB_ENV"
 
       - name: Install azd
         uses: Azure/setup-azd@v2
