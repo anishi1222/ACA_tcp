@@ -22,7 +22,8 @@ client --HTTP GET /api/tcp?port=N--> app B (:8080) --TCP "Hello N, how are you?"
 ├── pom.xml          親 POM (app-a / app-b をまとめてビルド)
 ├── app-a/           コンテナーアプリ A (Dockerfile: EXPOSE 18192 28192 38192)
 ├── app-b/           コンテナーアプリ B (Dockerfile: EXPOSE 8080)
-└── infra/           Azure Container Apps へデプロイする Bicep (main.bicep、main.bicepparam、modules/)
+├── azure.yaml       Azure Developer CLI (azd) の定義 (サービス app-a / app-b)
+└── infra/           Azure Container Apps へデプロイする Bicep (main.bicep、modules/、azd 用の main.parameters.json、az 用の main.sample.bicepparam)
 ```
 
 ## 仕様
@@ -138,9 +139,9 @@ Bad Gateway: cannot talk to app-a:12345 (ConnectException: Connection refused (c
 
 ## Azure へデプロイする (Bicep)
 
-`infra/` の Bicep で、A と B を別々の VNET 上の Container Apps 環境にデプロイします。サブスクリプション スコープのテンプレートで、リソース グループも作成します。
+`infra/` の Bicep で、A と B を別々の VNET 上の Container Apps 環境にデプロイします。サブスクリプション スコープのテンプレートで、リソース グループも作成します。プロビジョニングからイメージのビルド・デプロイまでを 1 コマンドで行う方法は、「[Azure Developer CLI (azd) でデプロイする](#azure-developer-cli-azd-でデプロイする)」を参照してください。
 
-> **実環境へのデプロイと疎通確認は、まだ行っていません。** 確認済みなのは、`az bicep build` (警告なし)、`az deployment sub validate`、`az deployment sub what-if` (エラーなし) までです。Microsoft Learn に記載がなく、実環境での確認が必要な点は「[実環境で確認が必要な点](#実環境で確認が必要な点)」にまとめています。
+> **実環境へのデプロイと疎通確認は、まだ行っていません。** 確認済みなのは、`az bicep build` (警告なし)、`az deployment sub validate`、`az deployment sub what-if` (エラーなし)、`azd provision --preview` (エラーなし) までです。Microsoft Learn に記載がなく、実環境での確認が必要な点は「[実環境で確認が必要な点](#実環境で確認が必要な点)」にまとめています。
 
 ### 構成
 
@@ -175,14 +176,16 @@ Logs: both environments -> diagnostic settings -> Log Analytics workspace (Azure
 | Container Apps 環境 | 内部 (VNET 内からのみ到達可能)。Public network access は無効 | 外部 (インターネットから到達可能) |
 | Ingress | TCP `18192` (VNET 内のみ) | HTTP `8080` (インターネットから HTTPS で到達) |
 | スケール | 最小 1 / 最大 1 (スケール ルールなし) | 最小 1 / 最大 1 (スケール ルールなし) |
-| イメージ | `docker.io/anishi/acatcp:a_v1.0` | `docker.io/anishi/acatcp:b_v1.0` |
+| イメージ (初期値) | `docker.io/anishi/acatcp:a_v1.0` | `docker.io/anishi/acatcp:b_v1.0` |
 | 環境変数 | なし | `TCP_SERVER_HOST` = A の FQDN (`app-a.<環境 A の既定ドメイン>`) |
 
 B は、A の FQDN を Private Endpoint 経由で名前解決し、A の `18192` へ TCP 接続します。Private DNS Zone は B の VNET にリンクしています。
 
+イメージは、Bicep のデプロイでは上記の Docker Hub のものを使います。azd でデプロイしたときは、`azd deploy` が ACR 上でビルドしたイメージに置き換わります。
+
 ### 作成されるリソース
 
-`<suffix>` は `nameSuffix` です (既定はランダムな 6 文字)。名前はすべてパラメーターで変更できます。
+`<suffix>` は `nameSuffix` です (既定は、サブスクリプション・環境名・リージョンから決まる、ランダムに見える 6 文字)。名前はすべてパラメーターで変更できます。
 
 | リソース | 名前 (既定) | 備考 |
 | --- | --- | --- |
@@ -191,7 +194,10 @@ B は、A の FQDN を Private Endpoint 経由で名前解決し、A の `18192`
 | VNET A とサブネット | `vnet-a-<suffix>` / `snet-a-<suffix>` | サブネットは `Microsoft.App/environments` に委任します |
 | VNET B とサブネット | `vnet-b-<suffix>` / `snet-b-<suffix>`、`snet-pe-<suffix>` | `snet-pe` は Private Endpoint 用で、委任しません |
 | Container Apps 環境 A / B | `cae-a-<suffix>` / `cae-b-<suffix>` | ワークロード プロファイル環境 (Consumption)。ログの出力先は Azure Monitor |
-| コンテナー アプリ | `app-a` / `app-b` | 0.5 vCPU / 1 GiB |
+| コンテナー アプリ | `app-a` / `app-b` | 0.5 vCPU / 1 GiB。タグ `azd-service-name` が azd のデプロイ先の目印です |
+| Container Registry | `acr<ハッシュ>` | Basic。azd がビルドしたイメージの置き場です (管理者ユーザーと匿名 pull は無効) |
+| ユーザー割り当てマネージド ID | `id-acatcp-<suffix>` | 両方のコンテナー アプリに割り当て、ACR からのイメージの pull に使います |
+| ロール割り当て | `AcrPull` (ACR スコープ) | 上のマネージド ID に付与します |
 | Private Endpoint | `pe-app-a-<suffix>` | B の VNET から環境 A へ接続します (group ID `managedEnvironments`) |
 | Private DNS Zone | `privatelink.<リージョン>.azurecontainerapps.io` | B の VNET にリンクし、DNS ゾーン グループで A レコードを自動登録します |
 | 診断設定 | `send-to-log-analytics` (環境 A / B) | 全ログ (`allLogs`) を Log Analytics ワークスペースへ送ります |
@@ -199,9 +205,9 @@ B は、A の FQDN を Private Endpoint 経由で名前解決し、A の `18192`
 ### 前提
 
 - Azure CLI と Bicep (`az bicep install`)。Azure CLI 2.90.0 / Bicep 0.49.2 で確認しています。
-- サブスクリプションに、リソース グループとリソースを作成できる権限 (サブスクリプション スコープのデプロイのため)。
-- リソース プロバイダー `Microsoft.App`、`Microsoft.Network`、`Microsoft.OperationalInsights`、`Microsoft.Insights` の登録 (`az provider register --namespace <名前>`)。
-- Docker Hub 上の `docker.io/anishi/acatcp:a_v1.0` と `b_v1.0`。両タグが存在し、どちらも `linux/amd64` であることを Docker Hub の API で確認しました。作り直す場合は、次のようにビルドして push します (Apple Silicon の Mac では `--platform linux/amd64` が必要です)。
+- サブスクリプションに、リソース グループとリソースを作成できる権限 (サブスクリプション スコープのデプロイのため)。ACR へのロール割り当て (`AcrPull`) も作るため、**Owner、または Contributor と User Access Administrator の両方**が必要です (Contributor だけでは、ロール割り当ての作成で失敗します)。
+- リソース プロバイダー `Microsoft.App`、`Microsoft.Network`、`Microsoft.OperationalInsights`、`Microsoft.Insights`、`Microsoft.ContainerRegistry`、`Microsoft.ManagedIdentity` の登録 (`az provider register --namespace <名前>`)。
+- Docker Hub 上の `docker.io/anishi/acatcp:a_v1.0` と `b_v1.0`。両タグが存在し、どちらも `linux/amd64` であることを Docker Hub の API で確認しました。作り直す場合は、次のようにビルドして push します (Apple Silicon の Mac では `--platform linux/amd64` が必要です)。azd でデプロイするときは、`azd deploy` が ACR 上でビルドするため push は不要です (ただし、最初の `azd provision` は、この Docker Hub のイメージで起動します)。
 
 ```bash
 podman build --platform linux/amd64 -t docker.io/anishi/acatcp:a_v1.0 app-a
@@ -214,7 +220,7 @@ podman push docker.io/anishi/acatcp:b_v1.0
 ### デプロイ
 
 ```bash
-# 既定: 名前はランダム。リージョンは --location と同じ
+# 既定: 名前は、サブスクリプション・環境名・リージョンから決まる、ランダムに見える固定値。リージョンは --location と同じ
 az deployment sub create --name acatcp --location japaneast --template-file infra/main.bicep
 
 # リージョンと名前を指定する場合
@@ -222,24 +228,24 @@ az deployment sub create --name acatcp --location japaneast --template-file infr
   --parameters location=japaneast resourceGroupName=rg-acatcp \
                appAVnetName=vnet-a appASubnetName=snet-a appBVnetName=vnet-b appBSubnetName=snet-b
 
-# パラメーター ファイルを使う場合 (infra/main.bicepparam。--template-file は不要です)
-az deployment sub create --name acatcp --location japaneast --parameters infra/main.bicepparam
+# パラメーター ファイルを使う場合 (サンプル: infra/main.sample.bicepparam。--template-file は不要です)
+az deployment sub create --name acatcp --location japaneast --parameters infra/main.sample.bicepparam
 ```
 
-`--location` はデプロイの管理情報の保存先です。`location` パラメーターを省略すると、リソースのリージョンにも使われます。
+`--location` はデプロイの管理情報の保存先です。`location` パラメーターを省略すると、リソースのリージョンにも使われます。サンプルを `main.bicepparam` ではなく `main.sample.bicepparam` と名付けているのは、azd が `main.bicepparam` を `main.parameters.json` より優先して読むためです。
 
 デプロイが終わったら、出力から B の URL を取り出して呼び出します。すべて想定どおりに動けば、次のような応答になります (実環境では未確認です)。
 
 ```bash
 az deployment sub show --name acatcp --query properties.outputs
 curl "$(az deployment sub show --name acatcp --query properties.outputs.appBUrl.value -o tsv)"
-# Acknowledged Hello 18192, how are you?. This message is sent from 18192!
+# Acknowledged Hello 18192, how are you? This message is sent from 18192!
 ```
 
-デプロイ前の確認 (`what-if`) は、`nameSuffix` を固定して実行します (理由は次の節を参照)。
+デプロイ前に変更内容を確認するには、`what-if` を使います。
 
 ```bash
-az deployment sub what-if --name acatcp --location japaneast --template-file infra/main.bicep --parameters nameSuffix=abc123
+az deployment sub what-if --name acatcp --location japaneast --template-file infra/main.bicep
 ```
 
 不要になったら、リソース グループごと削除します。
@@ -248,28 +254,33 @@ az deployment sub what-if --name acatcp --location japaneast --template-file inf
 az group delete --name "$(az deployment sub show --name acatcp --query properties.outputs.resourceGroupName.value -o tsv)"
 ```
 
+Log Analytics ワークスペースは論理削除されるため、同じ名前で 14 日以内に作り直すときは、リソース グループを削除する前にワークスペースを完全削除するか (`az monitor log-analytics workspace delete --resource-group <RG> --workspace-name <名前> --force --yes`)、`environmentName` / `nameSuffix` を変えてください。
+
 ### パラメーター
 
 すべて省略できます。名前の既定値は、`nameSuffix` を付けたものです。
 
 | パラメーター | 既定値 | 説明 |
 | --- | --- | --- |
+| `environmentName` | `acatcp` | 環境名。`nameSuffix` の生成元と、リソース グループのタグ `azd-env-name` に使います (azd では `AZURE_ENV_NAME`) |
 | `location` | `--location` の値 | リソースのリージョン |
-| `nameSuffix` | ランダムな 6 文字 (`newGuid()` から生成) | 既定の名前に付ける文字列 (3〜12 文字) |
+| `nameSuffix` | `take(uniqueString(サブスクリプション ID, environmentName, location), 6)` | 既定の名前に付ける文字列 (3〜12 文字)。ランダムに見えますが、入力が同じなら毎回同じ値です |
 | `resourceGroupName` | `rg-acatcp-<nameSuffix>` | リソース グループ名 |
 | `appAVnetName` | `vnet-a-<nameSuffix>` | app-a の VNET 名 |
 | `appASubnetName` | `snet-a-<nameSuffix>` | app-a の環境用サブネット名 |
 | `appBVnetName` | `vnet-b-<nameSuffix>` | app-b の VNET 名 |
 | `appBSubnetName` | `snet-b-<nameSuffix>` | app-b の環境用サブネット名 |
 | `appBPrivateEndpointSubnetName` | `snet-pe-<nameSuffix>` | Private Endpoint 用サブネット名 (B の VNET 内) |
+| `containerRegistryName` | `acr<ハッシュ>` | ACR 名 (5〜50 文字の英小文字と数字。Azure 全体で一意) |
 | `appAVnetAddressPrefix` | `10.10.0.0/16` | app-a の VNET のアドレス空間。サブネットは先頭の `/24` を使います |
 | `appBVnetAddressPrefix` | `10.20.0.0/16` | app-b の VNET のアドレス空間 (A の VNET と重ならないこと)。環境用サブネットは先頭の `/24`、Private Endpoint 用は 2 番目の `/24` |
-| `appAImage` / `appBImage` | `docker.io/anishi/acatcp:a_v1.0` / `:b_v1.0` | コンテナー イメージ |
-| `tags` | `{}` | すべてのリソースに付けるタグ |
+| `appAImage` / `appBImage` | `docker.io/anishi/acatcp:a_v1.0` / `:b_v1.0` | コンテナー イメージ (初期値) |
+| `appAExists` / `appBExists` | `false` | `true` のとき、既存のアプリの現在のイメージを維持し、`appAImage` / `appBImage` で上書きしません。azd が自動で設定するため、通常は指定不要です |
+| `tags` | `{}` | すべてのリソースに付けるタグ (`azd-env-name` は自動で追加) |
 
-- **名前をランダムにしている理由**: Log Analytics ワークスペースは、削除してから 14 日間は同じ名前を使えません (論理削除)。名前が固定だと、リソース グループの削除直後に、同じ名前で再デプロイできなくなるためです。
-- **再デプロイ**: 既定のままだと、デプロイのたびに別の名前で新しい一式が作られます。同じリソースを更新するときは、前回の出力 `nameSuffix` (または各名前のパラメーター) を指定してください。
-- **`what-if`**: `newGuid()` から生成した名前のリソースは、`what-if` で評価できません (`Unsupported`)。`nameSuffix` か各名前を指定したときに、内容を確認できます。
+- **名前の既定値は固定**: `nameSuffix` は `uniqueString` から作るため、サブスクリプション・環境名・リージョンが同じなら毎回同じ名前になります。同じコマンドを再実行すると、同じリソースを更新します (azd の再実行 (`azd provision` / `azd up`) や `what-if` が使えるのも、このためです)。
+- **別の名前で作り直す**: `environmentName` か `nameSuffix` を変えます。Log Analytics ワークスペースは、削除してから 14 日間は同じ名前を使えません (論理削除)。リソース グループを削除した直後に同じ名前で作り直すと失敗するため、上の「不要になったら」の手順で完全削除するか、名前を変えてください。
+- **アドレス空間とタグ**: azd 用の `infra/main.parameters.json` には、`appAVnetAddressPrefix` / `appBVnetAddressPrefix` / `tags` を載せていません。変えるときは、Bicep の既定値かこのファイルを編集します。
 
 ### ログ (Azure Monitor)
 
@@ -320,6 +331,108 @@ ContainerAppConsoleLogs
 - **追加で作られるリソースと費用**: ACA は、環境ごとに管理用のリソース グループ (名前は `ME_` で始まります) を作り、Standard のロード バランサー (外部環境は ingress 用のパブリック IP も) を置きます。egress 用の Standard の静的パブリック IP も含めて、Container Apps の料金とは別に課金されます ([Managed resources](https://learn.microsoft.com/azure/container-apps/custom-virtual-networks#managed-resources))。Private Endpoint にも追加料金があります。管理用のリソース グループは変更しないでください。
 - **Docker Hub の匿名プル**: 回数制限があります。デプロイが失敗したり、リビジョンが起動しなかったりするときは、プル エラーでないかを確認してください。
 - **NSG は作成していません**。必要に応じて追加してください。
+
+## Azure Developer CLI (azd) でデプロイする
+
+[Azure Developer CLI (azd)](https://learn.microsoft.com/azure/developer/azure-developer-cli/overview) を使うと、プロビジョニング (Bicep)、イメージのビルド、アプリのデプロイまでを、`azd up` の 1 コマンドで実行できます。azd 1.37.3 で確認しています。
+
+> **`azd up` による実環境へのデプロイは、まだ行っていません。** 確認済みなのは、`azd provision --preview` (名前の上書きの反映を含む)、`azd package`、`azure.yaml` のスキーマ検証までで、いずれもエラーはありません。実環境で確認が必要な点は、このセクションの最後にまとめています。
+
+### azd 用のファイル
+
+| ファイル | 内容 |
+| --- | --- |
+| `azure.yaml` | サービス `app-a` / `app-b` の定義です。デプロイ先は `host: containerapp`、ビルドは各ディレクトリの Dockerfile (`language: docker`。`host: containerapp` では `language` か `image` が必須です) です。イメージは ACR Tasks でビルドする (`remoteBuild: true`) ため、ローカルに Docker / Podman は不要です |
+| `infra/main.bicep` | プロビジョニングの入り口です。azd が使う出力 (`AZURE_RESOURCE_GROUP`、`AZURE_CONTAINER_REGISTRY_ENDPOINT`) と、デプロイ先を見つけるためのタグ (リソース グループなどに `azd-env-name`、コンテナー アプリに `azd-service-name`) を持ちます |
+| `infra/main.parameters.json` | azd の環境変数 (`AZURE_ENV_NAME`、`AZURE_LOCATION` など) を、Bicep のパラメーターに渡します (下の表) |
+| `infra/modules/registry.bicep` | ACR、ユーザー割り当てマネージド ID、`AcrPull` のロール割り当て |
+| `infra/modules/existing-container-image.bicep` | 再プロビジョニングのときに、デプロイ済みのイメージを維持するためのモジュール |
+
+`infra/main.sample.bicepparam` は、azd ではなく `az deployment sub create` 用のサンプルです。azd は `main.bicepparam` があると `main.parameters.json` を読まないため、名前を変えています。
+
+### コマンドの流れ
+
+| コマンド | 内容 |
+| --- | --- |
+| `azd provision` | `infra/main.bicep` をデプロイします。app-a / app-b は、Docker Hub の初期イメージで起動します |
+| `azd deploy` | `app-a` / `app-b` のイメージを ACR Tasks でビルドして ACR に push し、コンテナー アプリに新しいリビジョンを作ります |
+| `azd up` | `azd package`、`azd provision`、`azd deploy` を順に実行します |
+| `azd provision --preview` | リソースを作らずに、変更内容だけを確認します |
+| `azd down` | リソース グループごと削除します。`--purge` を付けると、論理削除されるリソース (Log Analytics ワークスペース) も完全に削除します |
+
+`azd deploy` の後で `azd provision` をもう一度実行しても、アプリのイメージは ACR のものが維持されます。azd が `SERVICE_APP_A_RESOURCE_EXISTS` / `SERVICE_APP_B_RESOURCE_EXISTS` を自動で設定し、Bicep がそれを見て、既存のアプリの現在のイメージを使うためです。
+
+### 前提
+
+- azd のインストール (macOS では `brew tap azure/azd && brew install azd` など。[インストール手順](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd))。
+- Azure へのサインイン (`azd auth login`)。
+- 権限とリソース プロバイダーは、「Azure へデプロイする (Bicep)」の「前提」と同じです (Owner、または Contributor と User Access Administrator)。
+- ローカルの Docker / Podman は不要です。
+
+### 使い方
+
+```bash
+azd auth login
+
+# 環境を作成します (環境名とリージョン。サブスクリプションは、省略すると azd up のときに選びます)
+azd env new acatcp-dev --location japaneast
+
+# プロビジョニングから、イメージのビルド・デプロイまでを実行します
+azd up
+```
+
+デプロイが終わったら、出力から B の URL を取り出して呼び出します。すべて想定どおりに動けば、次のような応答になります (実環境では未確認です)。
+
+```bash
+azd env get-values
+curl "$(azd env get-value appBUrl)"
+# Acknowledged Hello 18192, how are you? This message is sent from 18192!
+```
+
+ログは、「[ログ (Azure Monitor)](#ログ-azure-monitor)」のとおり、Log Analytics ワークスペースで確認します。
+
+不要になったら、`azd down --purge` で削除します。確認の質問を省くには、`--force` も付けます。
+
+### 名前などの指定
+
+azd では、Bicep のパラメーターを、azd の環境の値 (環境変数) で指定します。リージョン、リソース グループ名、VNET 名、サブネット名は、**最初の `azd up` (または `azd provision`) の前に** `azd env set` で設定してください。指定しない値は、既定値 (ランダムに見える名前) になります。最初のプロビジョニングの後で変えると、デプロイが失敗するか、別のリソースが作られます。
+
+```bash
+azd env set AZURE_RESOURCE_GROUP rg-acatcp
+azd env set AZURE_APP_A_VNET_NAME vnet-a
+azd env set AZURE_APP_A_SUBNET_NAME snet-a
+azd env set AZURE_APP_B_VNET_NAME vnet-b
+azd env set AZURE_APP_B_SUBNET_NAME snet-b
+```
+
+| 環境変数 | Bicep のパラメーター | 指定しないとき |
+| --- | --- | --- |
+| `AZURE_LOCATION` | `location` | `azd env new --location` か、`azd up` の対話で選んだリージョン |
+| `AZURE_ENV_NAME` | `environmentName` | azd の環境名 (azd が自動で設定) |
+| `AZURE_RESOURCE_GROUP` | `resourceGroupName` | `rg-acatcp-<suffix>` |
+| `AZURE_APP_A_VNET_NAME` / `AZURE_APP_A_SUBNET_NAME` | `appAVnetName` / `appASubnetName` | `vnet-a-<suffix>` / `snet-a-<suffix>` |
+| `AZURE_APP_B_VNET_NAME` / `AZURE_APP_B_SUBNET_NAME` | `appBVnetName` / `appBSubnetName` | `vnet-b-<suffix>` / `snet-b-<suffix>` |
+| `AZURE_APP_B_PE_SUBNET_NAME` | `appBPrivateEndpointSubnetName` | `snet-pe-<suffix>` |
+| `AZURE_NAME_SUFFIX` | `nameSuffix` | 環境名・リージョンなどから決まる 6 文字 |
+| `AZURE_CONTAINER_REGISTRY_NAME` | `containerRegistryName` | `acr<ハッシュ>` |
+| `AZURE_APP_A_IMAGE` / `AZURE_APP_B_IMAGE` | `appAImage` / `appBImage` | `docker.io/anishi/acatcp:a_v1.0` / `:b_v1.0` (初期イメージ) |
+
+VNET のアドレス空間 (`appAVnetAddressPrefix` / `appBVnetAddressPrefix`) とタグは、`infra/main.parameters.json` に項目を足すか、Bicep の既定値を変更します。
+
+### 補足 (azd)
+
+- **リージョンは後から変えません**: 環境 (VNET など) は、作成後にリージョンを変えられません。変えるときは、新しい azd 環境 (`azd env new`) を作ります。
+- **ACR の費用**: ACR (Basic) は、使っていなくても日額で課金されます。不要になったら、`azd down` で削除してください。
+- **初期イメージ**: `azd provision` は、Docker Hub の `anishi/acatcp` のイメージでアプリを作成します。匿名プルの回数制限などでプルに失敗すると、プロビジョニングが失敗することがあります。その場合は、`AZURE_APP_A_IMAGE` / `AZURE_APP_B_IMAGE` で、別の (匿名でプルできる) イメージを指定します。
+- **app-a のエンドポイント表示**: azd は、デプロイしたコンテナー アプリのエンドポイントを `https://<FQDN>/` の形で表示します。app-a は VNET 内の TCP ingress のため、この表示のとおりには接続できません (表示だけの問題です)。
+- **同じ名前で作り直す**: `azd down` に `--purge` を付けないと、Log Analytics ワークスペースが論理削除されるため、14 日間は同じ名前で作り直せません。
+
+### azd で実環境での確認が必要な点
+
+- `azd up` / `azd deploy` / `azd down` の実行 (このリポジトリでは未実施です)。
+- ACR Tasks が使えるか。サブスクリプションによっては ACR Tasks が許可されておらず、その場合は、azd がローカルの Docker でのビルドに切り替わります (Docker が必要です)。
+- 再プロビジョニング (`SERVICE_*_RESOURCE_EXISTS` が `true`) で、デプロイ済みのイメージが維持されること。Bicep のコンパイルと `validate` までしか確認していません。
+- 「[実環境で確認が必要な点](#実環境で確認が必要な点)」に挙げた、Private Endpoint 経由の TCP `18192` の疎通と名前解決。
 
 ## 参考: Azure CLI で 1 つの環境にデプロイする
 
@@ -414,11 +527,15 @@ az containerapp create \
 | `podman inspect` | A の ExposedPorts は 18192 / 28192 / 38192、B は 8080 |
 | `SIGTERM` での停止 | 終了コード 143 で正常終了 (`podman stop` は約 0.4 秒) |
 | `podman build --platform linux/amd64` (A) と起動 | Apple Silicon 上でビルド・起動とも成功 |
-| `az bicep build` (`infra/main.bicep`、各モジュール) と `az bicep build-params` (`main.bicepparam`) | エラー・警告なし |
-| `az deployment sub validate` (`infra/main.bicep`) | 成功 |
-| `az deployment sub what-if` (`nameSuffix` 固定) | エラーなし。作成されるリソースはすべて `Create` |
+| `az bicep build` (`infra/main.bicep`、各モジュール) と `az bicep build-params` (`main.sample.bicepparam`) | エラー・警告なし |
+| `az deployment sub validate` (`infra/main.bicep`。`appAExists` / `appBExists` が `false` と `true` の両方) | 成功 |
+| `az deployment sub what-if` (既定値、および名前を上書きした場合) | エラーなし。作成されるリソース (17 件) はすべて `Create`。上書きした名前 (リソース グループ、VNET、サブネット、ACR) が反映 |
+| `azd provision --preview` (名前の上書きを含む) | エラーなし。上書きした名前 (リソース グループ、VNET、ACR、`nameSuffix`) がプレビューに反映 |
+| `azd package --all` | 成功 (ビルドは `azd deploy` のときに ACR Tasks で行うため、ローカルでのビルドはなし) |
+| `azure.yaml` の JSON スキーマ検証 | エラーなし |
 | Docker Hub の `anishi/acatcp` | `a_v1.0` / `b_v1.0` の両タグが存在し、どちらも `linux/amd64` |
 | Bicep の実デプロイ、Private Endpoint 経由の TCP 疎通 | 未実施 (「実環境で確認が必要な点」を参照) |
+| `azd up` / `azd deploy` / `azd down` | 未実施 (「azd で実環境での確認が必要な点」を参照) |
 | ACA 環境へのデプロイ (`az containerapp`) | 未実施 |
 
 ## 補足

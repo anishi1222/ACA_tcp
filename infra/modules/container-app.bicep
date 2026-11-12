@@ -31,8 +31,14 @@ param location string
 @description('配置先の Container Apps 環境のリソース ID。')
 param environmentId string
 
-@description('コンテナー イメージ。')
+@description('コンテナー イメージ。通常は ACR 内のイメージです (初回のプロビジョニングだけ、ACR にイメージが無いため仮のイメージを渡します)。')
 param image string
+
+@description('イメージを pull する Azure Container Registry のログイン サーバー (<name>.azurecr.io)。ユーザー割り当てマネージド ID (AcrPull) で認証するため、管理者ユーザーやパスワードは使いません。')
+param registryServer string
+
+@description('ACR から pull するときに使うユーザー割り当てマネージド ID (AcrPull 付与済み) のリソース ID。')
+param registryIdentityId string
 
 param ingress ingressSettings
 
@@ -61,11 +67,23 @@ resource app 'Microsoft.App/containerApps@2026-01-01' = {
   name: name
   location: location
   tags: tags
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${registryIdentityId}': {}
+    }
+  }
   properties: {
     environmentId: environmentId
     workloadProfileName: 'Consumption'
     configuration: {
       activeRevisionsMode: 'Single'
+      registries: [
+        {
+          server: registryServer
+          identity: registryIdentityId
+        }
+      ]
       ingress: union(
         {
           external: ingress.external

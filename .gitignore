@@ -3,3 +3,6 @@ target/
 *.iml
 .vscode/
 .DS_Store
+
+# azd の環境ごとの状態 (.env に出力値が入ります)
+.azure/

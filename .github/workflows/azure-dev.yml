@@ -1,0 +1,111 @@
+# 自動デプロイ (CI/CD)。
+#   main への push                : テスト → azd provision → azd deploy
+#   プルリクエスト                : テストだけ
+#   手動実行 (workflow_dispatch)  : main で実行すると、push と同じくデプロイまで行います
+#
+# azd deploy は、ソースを Azure Container Registry (ACR) の ACR Tasks でビルドして ACR に push し、
+# そのイメージで Container Apps の新しいリビジョンを作ります (アプリはマネージド ID で ACR から pull します)。
+# ビルドは ACR 上で行うため、ランナーに Docker は要りません。
+#
+# Azure へのログインは OpenID Connect (フェデレーション資格情報) で行い、シークレットは使いません。
+# 初回に 1 度だけ、ローカルで azd pipeline config を実行します (README の「自動デプロイ」を参照)。
+# これが Azure 側の ID と、次のリポジトリ変数を作ります。
+#   AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_SUBSCRIPTION_ID / AZURE_ENV_NAME / AZURE_LOCATION
+# 値のある AZURE_ 始まりのリポジトリ変数 (例: AZURE_RESOURCE_GROUP) は、そのまま azd に渡します。
+name: azure-dev
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - app-a/**
+      - app-b/**
+      - infra/**
+      - azure.yaml
+      - pom.xml
+      - .github/workflows/azure-dev.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - app-a/**
+      - app-b/**
+      - pom.xml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      - name: Test
+        run: mvn -B -ntp verify
+
+  deploy:
+    # デプロイするのは main だけです (azd pipeline config のフェデレーション資格情報も main 向けです)。
+    if: github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      id-token: write
+      contents: read
+    # 同じ Azure 環境へ同時にデプロイしないよう、1 つずつ順番に実行します。
+    concurrency:
+      group: azure-dev-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 値のあるリポジトリ変数 (AZURE_*) だけを環境変数にします。
+      # 未設定の変数を env: に並べると空文字で渡り、Bicep の既定値 (名前の自動生成など) が使われなくなるためです。
+      - name: Load repository variables
+        env:
+          REPO_VARS: ${{ toJSON(vars) }}
+        run: |
+          missing=0
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_ENV_NAME AZURE_LOCATION; do
+            if ! jq -e --arg name "$name" '(.[$name] // "") != ""' <<<"$REPO_VARS" >/dev/null; then
+              echo "::error::リポジトリ変数 ${name} が未設定です。ローカルで azd pipeline config を実行してください (README の「自動デプロイ」を参照)。"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          jq -r 'to_entries[]
+            | select(.key | startswith("AZURE_"))
+            | select(.value != "" and (.value | contains("\n") | not))
+            | "\(.key)=\(.value)"' <<<"$REPO_VARS" >> "$GITHUB_ENV"
+
+      - name: Install azd
+        uses: Azure/setup-azd@v2
+
+      - name: Log in with azd (federated credentials)
+        run: |
+          azd auth login \
+            --client-id "$AZURE_CLIENT_ID" \
+            --federated-credential-provider github \
+            --tenant-id "$AZURE_TENANT_ID"
+
+      # ACR・マネージド ID・VNET・Container Apps など、infra/ の内容を反映します。
+      # 既存のアプリは、現在のイメージ (ACR のもの) を維持します。
+      - name: Provision infrastructure
+        run: azd provision --no-prompt
+
+      # ACR Tasks でビルド → ACR に push → Container Apps が ACR から pull して新しいリビジョンに切り替えます。
+      - name: Build, push to ACR and deploy
+        run: azd deploy --no-prompt

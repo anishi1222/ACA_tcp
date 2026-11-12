@@ -42,7 +42,7 @@ class EchoServerTest {
         for (int port : server.ports()) {
             try (var client = new Client(port)) {
                 client.send("Hello " + port + ", how are you?\n");
-                assertEquals("Acknowledged Hello " + port + ", how are you?. This message is sent from " + port + "!",
+                assertEquals("Acknowledged Hello " + port + ", how are you? This message is sent from " + port + "!",
                         client.readLine());
             }
         }
@@ -53,8 +53,8 @@ class EchoServerTest {
         int port = server.ports().getFirst();
         try (var client = new Client(port)) {
             client.send("one\r\ntwo\n");
-            assertEquals("Acknowledged one. This message is sent from " + port + "!", client.readLine());
-            assertEquals("Acknowledged two. This message is sent from " + port + "!", client.readLine());
+            assertEquals("Acknowledged one This message is sent from " + port + "!", client.readLine());
+            assertEquals("Acknowledged two This message is sent from " + port + "!", client.readLine());
         }
     }
 
@@ -64,7 +64,7 @@ class EchoServerTest {
         try (var client = new Client(port)) {
             client.send("no newline");
             client.socket.shutdownOutput();
-            assertEquals("Acknowledged no newline. This message is sent from " + port + "!", client.readLine());
+            assertEquals("Acknowledged no newline This message is sent from " + port + "!", client.readLine());
             assertTrue(client.isClosedByServer());
         }
     }

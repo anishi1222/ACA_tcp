@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION}"
+    },
+    "nameSuffix": {
+      "value": "${AZURE_NAME_SUFFIX}"
+    },
+    "resourceGroupName": {
+      "value": "${AZURE_RESOURCE_GROUP}"
+    },
+    "appAVnetName": {
+      "value": "${AZURE_APP_A_VNET_NAME}"
+    },
+    "appASubnetName": {
+      "value": "${AZURE_APP_A_SUBNET_NAME}"
+    },
+    "appBVnetName": {
+      "value": "${AZURE_APP_B_VNET_NAME}"
+    },
+    "appBSubnetName": {
+      "value": "${AZURE_APP_B_SUBNET_NAME}"
+    },
+    "appBPrivateEndpointSubnetName": {
+      "value": "${AZURE_APP_B_PE_SUBNET_NAME}"
+    },
+    "containerRegistryName": {
+      "value": "${AZURE_CONTAINER_REGISTRY_NAME}"
+    },
+    "appAImage": {
+      "value": "${AZURE_APP_A_IMAGE}"
+    },
+    "appBImage": {
+      "value": "${AZURE_APP_B_IMAGE}"
+    },
+    "appAExists": {
+      "value": "${SERVICE_APP_A_RESOURCE_EXISTS=false}"
+    },
+    "appBExists": {
+      "value": "${SERVICE_APP_B_RESOURCE_EXISTS=false}"
+    }
+  }
+}

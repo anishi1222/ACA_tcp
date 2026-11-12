@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: acatcp
+
+# azd up は「package → provision → deploy」の順に実行します。イメージは ACR のものだけを使います (Docker Hub は使いません)。
+#   1. package   : remoteBuild: true のときは、ローカルでは何も作りません (イメージは 3 で ACR 上に作ります)。
+#   2. provision : infra/main.bicep で ACR・マネージド ID (AcrPull)・VNET・Container Apps 環境・アプリを作ります。
+#                  ACR はここで初めてできるため、アプリは仮のイメージ (bootstrapImage) で起動します。
+#   3. deploy    : ソースを ACR Tasks へ送って Dockerfile でビルドし (Maven のビルドもコンテナー内)、できたイメージを
+#                  ACR に push します。続けて、そのイメージで Container App の新しいリビジョンを作ります。
+#                  アプリはマネージド ID (AcrPull) で ACR からイメージを pull します。
+# 2 回目以降の azd provision は、アプリの現在のイメージ (ACR のもの) を維持します。
+#
+# サービス名は infra/main.bicep のコンテナー アプリ名 (タグ azd-service-name) と一致させます。
+# language: docker は、Dockerfile でビルドするプロジェクトの指定です (host: containerapp では language か image が必須)。
+# ACR Tasks でビルドする (remoteBuild) ため、ローカルに Docker / Podman は不要です (linux/amd64 でビルドされます)。
+# ローカルでビルドしたいときは remoteBuild: false にします (Docker か Podman が必要。この場合、イメージは package で作られ、
+# deploy で ACR に push されます)。
+services:
+  app-a:
+    project: ./app-a
+    host: containerapp
+    language: docker
+    docker:
+      path: ./Dockerfile
+      remoteBuild: true
+  app-b:
+    project: ./app-b
+    host: containerapp
+    language: docker
+    docker:
+      path: ./Dockerfile
+      remoteBuild: true

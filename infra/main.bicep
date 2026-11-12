@@ -1,22 +1,32 @@
 // app-a (TCP / プライベート) と app-b (HTTP / パブリック) を、別々の VNET 上の Container Apps 環境にデプロイします。
 //
 //   app-b の VNET (10.20.0.0/16)                       app-a の VNET (10.10.0.0/16)
-//   ┌───────────────────────────────┐                  ┌───────────────────────────┐
-//   │ Container Apps 環境 B (外部)  │                  │ Container Apps 環境 A     │
-//   │   app-b : HTTP 8080 (公開)    │                  │ (内部 / Public access 無効)│
-//   │ Private Endpoint ─────────────┼── Private Link ─▶│   app-a : TCP 18192       │
-//   │ Private DNS Zone (リンク済み) │                  └───────────────────────────┘
+//   ┌───────────────────────────────┐                  ┌─────────────────────────────┐
+//   │ Container Apps 環境 B (外部)  │                  │ Container Apps 環境 A       │
+//   │   app-b : HTTP 8080 (公開)    │                  │ (内部 / Public access 無効) │
+//   │ Private Endpoint ─────────────┼── Private Link ─▶│   app-a : TCP 18192         │
+//   │ Private DNS Zone (リンク済み) │                  └─────────────────────────────┘
 //   └───────────────────────────────┘
 //   ログ: 両環境 → 診断設定 → Log Analytics ワークスペース (Azure Monitor)
 targetScope = 'subscription'
 
-@description('デプロイ先リージョン。未指定のときは、デプロイ時に指定した --location と同じになります。')
+@description('環境名。azd では AZURE_ENV_NAME が渡され、名前の既定値の生成とリソース グループのタグ (azd-env-name) に使います。')
+@minLength(1)
+@maxLength(64)
+param environmentName string = 'acatcp'
+
+@description('デプロイ先リージョン。未指定のときは、デプロイ時に指定した --location と同じになります (azd では AZURE_LOCATION)。')
+@metadata({
+  azd: {
+    type: 'location'
+  }
+})
 param location string = deployment().location
 
-@description('既定の名前に付けるランダムな文字列 (小文字英数字 3〜12 文字)。同じ名前で更新デプロイするときは、前回と同じ値を指定します。')
+@description('既定の名前に付ける文字列 (小文字英数字 3〜12 文字)。サブスクリプション ID・環境名・リージョンから作る、ランダムに見える固定値です。同じ入力なら毎回同じ値になるため、再実行しても同じリソースを更新します。')
 @minLength(3)
 @maxLength(12)
-param nameSuffix string = take(newGuid(), 6)
+param nameSuffix string = take(uniqueString(subscription().id, environmentName, location), 6)
 
 @description('リソース グループ名。未指定のときは rg-acatcp-<nameSuffix>。')
 param resourceGroupName string = 'rg-acatcp-${nameSuffix}'
@@ -42,25 +52,46 @@ param appAVnetAddressPrefix string = '10.10.0.0/16'
 @description('app-b の VNET のアドレス空間 (/16)。app-a の VNET と重ならないようにします。')
 param appBVnetAddressPrefix string = '10.20.0.0/16'
 
-@description('app-a のコンテナー イメージ。')
-param appAImage string = 'docker.io/anishi/acatcp:a_v1.0'
+@description('Azure Container Registry 名 (5〜50 文字の英小文字と数字。Azure 全体で一意)。未指定のときは acr<ハッシュ>。')
+@minLength(5)
+@maxLength(50)
+param containerRegistryName string = 'acr${uniqueString(subscription().id, resourceGroupName)}'
 
-@description('app-b のコンテナー イメージ。')
-param appBImage string = 'docker.io/anishi/acatcp:b_v1.0'
+@description('ACR にまだイメージが無い初回のプロビジョニングだけで使う仮のイメージ (Docker Hub ではなく、Microsoft Container Registry の公開イメージ)。ACR は同じデプロイで作るため、この時点ではイメージを置けません。azd deploy でビルドして ACR に push したイメージに置き換わり、再プロビジョニングでは ACR のイメージを維持します。')
+param bootstrapImage string = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
 
-@description('すべてのリソースに付けるタグ。')
+@description('app-a のイメージ。ACR 内のものだけを指定できます。「リポジトリ:タグ」(例: app-a:v1) を指定すると、ACR のログイン サーバーを自動で前に付けます (完全な参照でも構いません)。ACR 以外のレジストリのイメージは pull できません。未指定のときは、appAExists が true なら現在のイメージを維持し、false なら bootstrapImage を使います。azd では azd deploy がイメージを設定するため、指定は不要です。')
+param appAImage string = ''
+
+@description('app-b のイメージ。ACR 内のものだけを指定できます。「リポジトリ:タグ」(例: app-b:v1) を指定すると、ACR のログイン サーバーを自動で前に付けます (完全な参照でも構いません)。ACR 以外のレジストリのイメージは pull できません。未指定のときは、appBExists が true なら現在のイメージを維持し、false なら bootstrapImage を使います。azd では azd deploy がイメージを設定するため、指定は不要です。')
+param appBImage string = ''
+
+@description('app-a が既にデプロイ済みか。true で appAImage が未指定のときは、現在のイメージを維持します (azd が自動設定。azd を使わないときは、イメージ指定を省く 2 回目以降に true にします)。')
+param appAExists bool = false
+
+@description('app-b が既にデプロイ済みか。true で appBImage が未指定のときは、現在のイメージを維持します (azd が自動設定。azd を使わないときは、イメージ指定を省く 2 回目以降に true にします)。')
+param appBExists bool = false
+
+@description('すべてのリソースに付けるタグ。azd-env-name は自動で追加されます。')
 param tags object = {}
 
+// コンテナー アプリ名。azure.yaml のサービス名 (app-a / app-b) と、タグ azd-service-name の値にもなります。
+var appAName = 'app-a'
+var appBName = 'app-b'
 var appATcpPort = 18192
 var appBHttpPort = 8080
 
-// nameSuffix の既定値は newGuid() (ランダム) のため、リンターの警告を抑止しています。
-// 再デプロイで同じリソースを更新するときは、nameSuffix か各名前のパラメーターを指定してください。
+// azd は azd-env-name でリソース グループを、azd-service-name でデプロイ先のコンテナー アプリを見つけます。
+var allTags = union(tags, { 'azd-env-name': environmentName })
+
+// 指定されたイメージを ACR 内の参照にそろえます。ログイン サーバーが付いていなければ付けるため、ACR 以外のイメージにはなりません。
+func acrImageRef(loginServer string, image string) string =>
+  startsWith(image, '${loginServer}/') ? image : '${loginServer}/${image}'
+
 resource rg 'Microsoft.Resources/resourceGroups@2025-04-01' = {
-  #disable-next-line use-stable-resource-identifiers
   name: resourceGroupName
   location: location
-  tags: tags
+  tags: allTags
 }
 
 // ログの保存先 (Azure Monitor)。
@@ -70,7 +101,20 @@ module monitoring 'modules/monitoring.bicep' = {
   params: {
     name: 'log-acatcp-${nameSuffix}'
     location: location
-    tags: tags
+    tags: allTags
+  }
+}
+
+// コンテナー アプリが実行するイメージの置き場 (ACR) と、イメージを pull するマネージド ID。
+// イメージは azd deploy (ACR Tasks でのビルド) や az acr build で ACR に置き、アプリは ACR から pull します。
+module registry 'modules/registry.bicep' = {
+  scope: rg
+  name: 'registry'
+  params: {
+    name: containerRegistryName
+    identityName: 'id-acatcp-${nameSuffix}'
+    location: location
+    tags: allTags
   }
 }
 
@@ -83,7 +127,7 @@ module networkA 'modules/network.bicep' = {
     vnetAddressPrefix: appAVnetAddressPrefix
     containerAppsSubnetName: appASubnetName
     containerAppsSubnetPrefix: cidrSubnet(appAVnetAddressPrefix, 24, 0)
-    tags: tags
+    tags: allTags
   }
 }
 
@@ -98,7 +142,7 @@ module networkB 'modules/network.bicep' = {
     containerAppsSubnetPrefix: cidrSubnet(appBVnetAddressPrefix, 24, 0)
     privateEndpointSubnetName: appBPrivateEndpointSubnetName
     privateEndpointSubnetPrefix: cidrSubnet(appBVnetAddressPrefix, 24, 1)
-    tags: tags
+    tags: allTags
   }
 }
 
@@ -113,7 +157,7 @@ module environmentA 'modules/environment.bicep' = {
     internal: true
     publicNetworkAccess: 'Disabled'
     logAnalyticsWorkspaceId: monitoring.outputs.id
-    tags: tags
+    tags: allTags
   }
 }
 
@@ -128,27 +172,51 @@ module environmentB 'modules/environment.bicep' = {
     internal: false
     publicNetworkAccess: 'Enabled'
     logAnalyticsWorkspaceId: monitoring.outputs.id
-    tags: tags
+    tags: allTags
+  }
+}
+
+// ACR に置いたイメージを、再プロビジョニングで仮イメージ (bootstrapImage) へ戻さないよう、既存アプリのイメージを引き継ぎます。
+module appAImageState 'modules/existing-container-image.bicep' = {
+  scope: rg
+  name: 'app-a-image-state'
+  params: {
+    exists: appAExists
+    name: appAName
+  }
+}
+
+module appBImageState 'modules/existing-container-image.bicep' = {
+  scope: rg
+  name: 'app-b-image-state'
+  params: {
+    exists: appBExists
+    name: appBName
   }
 }
 
 // app-b の環境からは別の環境にいるため、ingress は external: true にします (false だと同一環境内からしか呼べません)。
 // 環境 A が内部環境なので、実際に到達できるのは VNET 内 (Private Endpoint 経由を含む) だけです。
+// イメージの決まり方: appAImage の指定 (ACR 内) > デプロイ済みのイメージ (appAExists) > 初回用の仮イメージ (bootstrapImage)。
 module appA 'modules/container-app.bicep' = {
   scope: rg
   name: 'app-a'
   params: {
-    name: 'app-a'
+    name: appAName
     location: location
     environmentId: environmentA.outputs.id
-    image: appAImage
+    image: !empty(appAImage)
+      ? acrImageRef(registry.outputs.loginServer, appAImage)
+      : (appAExists ? appAImageState.outputs.image : bootstrapImage)
+    registryServer: registry.outputs.loginServer
+    registryIdentityId: registry.outputs.identityId
     ingress: {
       external: true
       transport: 'tcp'
       targetPort: appATcpPort
       exposedPort: appATcpPort
     }
-    tags: tags
+    tags: union(allTags, { 'azd-service-name': appAName })
   }
 }
 
@@ -162,7 +230,7 @@ module privateEndpoint 'modules/private-endpoint.bicep' = {
     targetEnvironmentId: environmentA.outputs.id
     subnetId: networkB.outputs.privateEndpointSubnetId
     linkedVnetId: networkB.outputs.vnetId
-    tags: tags
+    tags: allTags
   }
 }
 
@@ -170,10 +238,14 @@ module appB 'modules/container-app.bicep' = {
   scope: rg
   name: 'app-b'
   params: {
-    name: 'app-b'
+    name: appBName
     location: location
     environmentId: environmentB.outputs.id
-    image: appBImage
+    image: !empty(appBImage)
+      ? acrImageRef(registry.outputs.loginServer, appBImage)
+      : (appBExists ? appBImageState.outputs.image : bootstrapImage)
+    registryServer: registry.outputs.loginServer
+    registryIdentityId: registry.outputs.identityId
     ingress: {
       external: true
       transport: 'http'
@@ -186,7 +258,7 @@ module appB 'modules/container-app.bicep' = {
         value: appA.outputs.fqdn
       }
     ]
-    tags: tags
+    tags: union(allTags, { 'azd-service-name': appBName })
   }
   // 名前解決の準備ができてから app-b を起動します。
   dependsOn: [
@@ -201,3 +273,8 @@ output appBFqdn string = appB.outputs.fqdn
 output appBUrl string = 'https://${appB.outputs.fqdn}/api/tcp?port=${appATcpPort}'
 output logAnalyticsWorkspaceName string = monitoring.outputs.name
 output privateDnsZoneName string = privateEndpoint.outputs.privateDnsZoneName
+output containerRegistryName string = registry.outputs.name
+
+// azd が使う出力 (.azure/<環境名>/.env に保存されます)。
+output AZURE_RESOURCE_GROUP string = rg.name
+output AZURE_CONTAINER_REGISTRY_ENDPOINT string = registry.outputs.loginServer
