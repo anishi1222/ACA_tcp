@@ -90,7 +90,9 @@ final class EchoServer implements AutoCloseable {
         listeners.forEach(EchoServer::closeQuietly);
         connections.shutdownNow();
         try {
-            connections.awaitTermination(5, TimeUnit.SECONDS);
+            if (!connections.awaitTermination(5, TimeUnit.SECONDS)) {
+                LOG.log(WARNING, "Timed out waiting for connections to terminate");
+            }
         } catch (InterruptedException _) {
             Thread.currentThread().interrupt();
         }
@@ -113,6 +115,8 @@ final class EchoServer implements AutoCloseable {
                 }
                 LOG.log(ERROR, "accept() failed on port " + port, e);
                 try {
+                    // Back off after accept failures, not while waiting for connections.
+                    //noinspection BusyWait
                     Thread.sleep(100);
                 } catch (InterruptedException _) {
                     Thread.currentThread().interrupt();

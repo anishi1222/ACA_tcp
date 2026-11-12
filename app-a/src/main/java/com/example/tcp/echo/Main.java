@@ -13,13 +13,14 @@ public final class Main {
     private Main() {
     }
 
-    public static void main(String[] args) throws IOException {
+    static void main() throws IOException {
         // One line per record keeps container log streams readable.
         System.setProperty(LOG_FORMAT_KEY,
                 System.getProperty(LOG_FORMAT_KEY, "%1$tFT%1$tT.%1$tL%1$tz %4$-7s [%3$s] %5$s%6$s%n"));
 
-        var server = EchoServer.start(PORTS, IDLE_TIMEOUT);
-        // The accept threads are non-daemon, so the JVM stays up after main returns.
-        Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().name("shutdown").unstarted(server::close));
+        try (var server = EchoServer.start(PORTS, IDLE_TIMEOUT)) {
+            // The accept threads are non-daemon, so the JVM stays up after main returns.
+            Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().name("shutdown").unstarted(server::close));
+        }
     }
 }
