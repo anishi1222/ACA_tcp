@@ -23,7 +23,6 @@ A は JDK 標準ライブラリと仮想スレッドのみを使用します。B
 ├── app-a/           コンテナーアプリ A (Dockerfile: EXPOSE 18192 28192 38192)
 ├── app-b/           コンテナーアプリ B (Dockerfile: EXPOSE 8080)
 ├── azure.yaml       Azure Developer CLI (azd) の定義 (サービス app-a / app-b)
-├── .github/         自動デプロイの GitHub Actions ワークフロー (workflows/azure-dev.yml)
 └── infra/           Azure Container Apps へデプロイする Bicep (main.bicep、modules/、azd 用の main.parameters.json、az 用の main.sample.bicepparam)
 ```
 
@@ -374,7 +373,7 @@ ContainerAppConsoleLogs
 
 ## Azure Developer CLI (azd) でデプロイする
 
-[Azure Developer CLI (azd)](https://learn.microsoft.com/azure/developer/azure-developer-cli/overview) を使うと、プロビジョニング (Bicep)、イメージのビルドと ACR への push、Container Apps へのデプロイ (ACR からの pull) までを、`azd up` の 1 コマンドで実行できます。さらに `azd pipeline config` で、GitHub Actions による自動デプロイも構成できます (「[自動デプロイ (GitHub Actions)](#自動デプロイ-github-actions)」)。azd 1.37.3 で確認しています。
+[Azure Developer CLI (azd)](https://learn.microsoft.com/azure/developer/azure-developer-cli/overview) を使うと、プロビジョニング (Bicep)、イメージのビルドと ACR への push、Container Apps へのデプロイ (ACR からの pull) までを、`azd up` の 1 コマンドで実行できます。このリポジトリには GitHub Actions のワークフローは含めていません。以下のコマンドを手動で実行してください。azd 1.37.3 で確認しています。
 
 > **`azd up` による実環境へのデプロイは、まだ行っていません。** 確認済みなのは、`azd provision --preview` (名前の上書きの反映を含む)、`azd package`、`azure.yaml` のスキーマ検証までで、いずれもエラーはありません。実環境で確認が必要な点は、このセクションの最後にまとめています。
 
@@ -389,7 +388,6 @@ ContainerAppConsoleLogs
 | 3 | `azd deploy` (ビルドとイメージの作成) | ソースを ACR Tasks に送り、各アプリの Dockerfile でビルドします (Maven のビルドもコンテナー内)。ローカルの Docker / Podman は要りません |
 | 4 | `azd deploy` (ACR への push) | できたイメージを ACR に置きます (リポジトリは `acatcp/<サービス名>-<azd の環境名>`、タグは `azd-deploy-<UNIX 時刻>`) |
 | 5 | `azd deploy` (Container Apps へのデプロイ) | アプリのイメージを ACR のものに切り替え、新しいリビジョンを作ります。アプリは、マネージド ID (`AcrPull`) で ACR から pull します |
-| 6 | `azd pipeline config` (初回に 1 度) | GitHub Actions の自動デプロイを構成します。以後は、`main` への push で 2〜5 が自動で実行されます |
 
 プロビジョニング (2) は、イメージを置く ACR を作るため、ビルドより前に行います。ビルドから Container Apps へのデプロイまで (3〜5) は、`azd deploy` の中で続けて行われます。
 
@@ -402,7 +400,6 @@ ContainerAppConsoleLogs
 | `infra/main.parameters.json` | azd の環境変数 (`AZURE_ENV_NAME`、`AZURE_LOCATION` など) を、Bicep のパラメーターに渡します (下の表) |
 | `infra/modules/registry.bicep` | ACR、ユーザー割り当てマネージド ID、`AcrPull` のロール割り当て |
 | `infra/modules/existing-container-image.bicep` | 再プロビジョニングのときに、デプロイ済みのイメージを維持するためのモジュール |
-| `.github/workflows/azure-dev.yml` | 自動デプロイのワークフロー (「[自動デプロイ (GitHub Actions)](#自動デプロイ-github-actions)」) |
 
 `infra/main.sample.bicepparam` は、azd ではなく `az deployment sub create` 用のサンプルです。azd は `main.bicepparam` があると `main.parameters.json` を読まないため、名前を変えています。
 
@@ -413,7 +410,6 @@ ContainerAppConsoleLogs
 | `azd provision` | `infra/main.bicep` をデプロイします。app-a / app-b は、仮のイメージ (`bootstrapImage`) で起動します |
 | `azd deploy` | `app-a` / `app-b` のイメージを ACR Tasks でビルドして ACR に push し、コンテナー アプリのイメージを ACR のものに切り替えて、新しいリビジョンを作ります |
 | `azd up` | `azd package`、`azd provision`、`azd deploy` を順に実行します |
-| `azd pipeline config` | GitHub Actions の自動デプロイを構成します (「[自動デプロイ (GitHub Actions)](#自動デプロイ-github-actions)」) |
 | `azd provision --preview` | リソースを作らずに、変更内容だけを確認します |
 | `azd down` | リソース グループごと削除します。`--purge` を付けると、論理削除されるリソース (Log Analytics ワークスペース) も完全に削除します |
 
@@ -425,7 +421,6 @@ ContainerAppConsoleLogs
 - Azure へのサインイン (`azd auth login`)。
 - 権限とリソース プロバイダーは、「Azure へデプロイする (Bicep)」の「前提」と同じです (Owner、または Contributor と User Access Administrator)。
 - ローカルの Docker / Podman は不要です (イメージは ACR Tasks でビルドします)。
-- 自動デプロイを構成する場合は、GitHub CLI (`gh`) と、GitHub のリポジトリ。
 
 ### 使い方
 
@@ -481,6 +476,7 @@ VNET のアドレス空間 (`appAVnetAddressPrefix` / `appBVnetAddressPrefix`) �
 
 - **リージョンは後から変えません**: 環境 (VNET など) は、作成後にリージョンを変えられません。変えるときは、新しい azd 環境 (`azd env new`) を作ります。
 - **ACR の費用**: ACR (Basic) は、使っていなくても日額で課金されます。不要になったら、`azd down` で削除してください。
+- **ACR のイメージは増えます**: デプロイのたびに、新しいタグ (`azd-deploy-<UNIX 時刻>`) のイメージが ACR に残ります。古いイメージは、`az acr repository delete` などで整理してください。
 - **仮のイメージ**: 初回の `azd provision` は、ACR にまだイメージが無いため、Microsoft Container Registry の公開イメージ (`bootstrapImage`) でアプリを作ります。`azd deploy` が ACR のイメージに切り替えると、役目を終えます。
 - **ローカルでビルドする場合**: `azure.yaml` の `remoteBuild` を `false` にします (Docker か Podman が必要です)。`azd package` がイメージを作り、`azd deploy` が ACR に push します。azd は `linux/amd64` を指定してビルドするため、Apple Silicon の Mac では、エミュレーションで時間がかかります。
 - **app-a のエンドポイント表示**: azd は、デプロイしたコンテナー アプリのエンドポイントを `https://<FQDN>/` の形で表示します。app-a は VNET 内の TCP ingress のため、この表示のとおりには接続できません (表示だけの問題です)。
@@ -495,88 +491,6 @@ VNET のアドレス空間 (`appAVnetAddressPrefix` / `appBVnetAddressPrefix`) �
 - `AcrPull` の割り当ての反映待ち。`azd provision` の直後に `azd deploy` が走るため、反映前に ACR から pull しようとすると、一時的に失敗するかもしれません (その場合は、`azd deploy` をもう一度実行します)。
 - 再プロビジョニング (`SERVICE_*_RESOURCE_EXISTS` が `true`) で、デプロイ済みのイメージが維持されること。Bicep のコンパイルと `validate` までしか確認していません。
 - 「[実環境で確認が必要な点](#実環境で確認が必要な点)」に挙げた、Private Endpoint 経由の TCP `18192` の疎通と名前解決。
-- 自動デプロイ (「[自動デプロイで実環境での確認が必要な点](#自動デプロイで実環境での確認が必要な点)」)。
-
-## 自動デプロイ (GitHub Actions)
-
-`.github/workflows/azure-dev.yml` は、`main` への push をきっかけに、テスト、プロビジョニング、イメージのビルド、ACR への push、Container Apps へのデプロイ (ACR からの pull) までを自動で行います。ビルドは ACR Tasks で行うため、ランナーに Docker は要りません。デプロイ設定は GitHub Actions のリポジトリシークレットから読み込みます。Azure へのログインは引き続き OpenID Connect (フェデレーション資格情報) で行い、クライアントシークレットは不要です。
-
-| きっかけ | 実行内容 |
-| --- | --- |
-| `main` への push (`app-a/`、`app-b/`、`infra/`、`azure.yaml`、`pom.xml`、ワークフロー自身のどれかを変更) | テスト → `azd provision` → `azd deploy` |
-| `main` 宛てのプルリクエスト (`app-a/`、`app-b/`、`pom.xml` のどれかを変更) | テストだけです (Azure にはアクセスしません) |
-| 手動実行 (`workflow_dispatch`) | `main` で実行したときは、push と同じくデプロイまで行います。それ以外のブランチでは、テストだけです |
-
-処理は、次の順に進みます。同じ環境へ同時にデプロイしないよう、デプロイは 1 つずつ順番に実行します。
-
-1. `test` ジョブ: Java 25 (Temurin) で `mvn -B -ntp verify` を実行します。
-2. `deploy` ジョブ (`test` の成功後、`main` でだけ実行): デプロイ用のシークレット (`AZURE_*`) を読み込みます。必須のシークレットが無いときは、ここでエラーにします。
-3. `azd auth login` (フェデレーション資格情報) で、Azure にログインします。
-4. `azd provision --no-prompt`: `infra/` の内容を反映します。既存のアプリは、現在のイメージ (ACR のもの) のままです。
-5. `azd deploy --no-prompt`: ACR Tasks でビルドし、ACR に push して、Container Apps に新しいリビジョンを作ります (アプリは、マネージド ID で ACR から pull します)。
-
-### 有効にする (初回に 1 度)
-
-このリポジトリを GitHub に push した状態で、ローカルから次を実行します。
-
-```bash
-gh auth login
-azd auth login
-
-# azd の環境が無ければ作成します (名前を指定する場合は、「名前などの指定」の azd env set を先に実行します)
-azd env new acatcp-dev --location japaneast
-
-# Azure 側の ID (サービス プリンシパルとフェデレーション資格情報) と、GitHub のリポジトリ変数を作ります
-azd pipeline config
-
-# Actions > Variables の対応する値を、リポジトリシークレットに登録します (対話入力)
-gh secret set AZURE_CLIENT_ID
-gh secret set AZURE_TENANT_ID
-gh secret set AZURE_SUBSCRIPTION_ID
-gh secret set AZURE_ENV_NAME
-gh secret set AZURE_LOCATION
-```
-
-`azd pipeline config` は、azd 1.37.3 のソースで確認した範囲では、次のことを行います (実行はしていません)。
-
-- Microsoft Entra ID にアプリの登録 (サービス プリンシパル) を作り、既定では、サブスクリプションに対する `Contributor` と `User Access Administrator` のロールを割り当てます。`User Access Administrator` は、Bicep が `AcrPull` のロール割り当てを作るために必要です。権限を絞るときは `--principal-role` でロールを指定しますが、ロール割り当てを書き込める権限は必要です。
-- フェデレーション資格情報を、プルリクエスト、現在のブランチ、`main` 向けに作ります。
-- GitHub のリポジトリ変数を設定します。このワークフローは参照しないため、上記の手順で対応するリポジトリシークレットに値をコピーします。
-- `.github/workflows/azure-dev.yml` が既にあるため、ワークフローは生成しません。
-
-ワークフローを `main` に push する前に、必須のシークレットを登録してください。ワークフローを含むコミットが `main` に入った状態で、`main` に push すると、自動デプロイが始まります (`azd pipeline config` が、コミットと push を提案することがあります)。
-
-### リポジトリシークレット
-
-Settings → Secrets and variables → Actions → Secrets → New repository secret で登録します。`gh secret set <名前>` で値を対話入力することもできます。`azd pipeline config` が作るのは変数でありシークレットではないため、Variables に登録されているだけでは動作しません。
-
-| シークレット | 内容 |
-| --- | --- |
-| `AZURE_CLIENT_ID` (必須) | 作成したサービス プリンシパルのクライアント ID |
-| `AZURE_TENANT_ID` (必須) | Entra テナントの ID |
-| `AZURE_SUBSCRIPTION_ID` (必須) | デプロイ先のサブスクリプション |
-| `AZURE_ENV_NAME` (必須) | azd の環境名 |
-| `AZURE_LOCATION` (必須) | リージョン |
-| `AZURE_RESOURCE_GROUP`、`AZURE_APP_A_VNET_NAME` など (任意) | 「[名前などの指定](#名前などの指定)」の環境変数を、既定値を上書きするときだけ同名のシークレットとして登録します。無い値は、既定の (ランダムに見える) 名前になります |
-
-必須の 5 つのどれかが無いと、`Load deployment secrets` が不足しているシークレット名を示して、Azure にログインする前に停止します。既存のリポジトリ変数へのフォールバックは行いません。
-
-ワークフローは、すべてのリポジトリシークレットではなく、`azure-dev.yml` に列挙したデプロイ設定だけを参照します。値のあるものだけを azd に渡し、改行を含む値はエラーにします。空の値を渡すと、azd は Bicep の既定値ではなく空文字を使うためです (`AZURE_NAME_SUFFIX` を空にして `azd provision --preview` を実行すると、`nameSuffix` が 3 文字未満というエラーになることを確認しました)。後から値を変更するときは、`gh secret set <名前>` を使いますが、最初のプロビジョニングの後でリソース名を変えると、別のリソースが作られます。新しいデプロイ設定を追加する場合は、ワークフローにも対応するシークレット参照を追加してください。
-
-### 補足 (自動デプロイ)
-
-- **デプロイするのは `main` だけです**: `deploy` ジョブは、`main` でだけ動きます。別のブランチからデプロイするときは、そのブランチのフェデレーション資格情報 (`azd pipeline config` を、そのブランチで実行すると作られます) を用意し、ワークフローの `if:` も変更してください。
-- **Azure portal の「継続的デプロイ」とは併用しません**: Container Apps の「継続的デプロイ」が生成する GitHub Actions のワークフローは、同じアプリを別の経路で更新します。このリポジトリには、ポータルが生成したワークフローは含めていません。ポータルでの設定を解除してワークフローを削除しても、リポジトリのシークレット (`APPA_*`、`APPB_*`。クライアント ID、テナント ID、サブスクリプション ID、レジストリのユーザー名とパスワード) は残ります。`azure-dev.yml` はこれらの `APPA_*` / `APPB_*` シークレットを使わないため、不要であれば削除してください (`gh secret delete <名前>`)。レジストリのパスワードを含むため、削除するか、パスワードを再生成することをお勧めします。
-- **ACR のイメージは増えます**: デプロイのたびに、新しいタグ (`azd-deploy-<UNIX 時刻>`) のイメージが ACR に残ります。古いイメージは、`az acr repository delete` などで整理してください。
-
-### 自動デプロイで実環境での確認が必要な点
-
-- `azd pipeline config` の実行、GitHub Actions でのフェデレーション資格情報による `azd auth login`、ワークフローからの `azd provision` / `azd deploy` の実行 (どれも、このリポジトリでは未実施です)。シークレットを使う構成は、GitHub Actions 上での実行確認が必要です。シークレット移行前には、`test` ジョブの成功後、必須変数が無いときに `deploy` ジョブが停止することを GitHub 上で確認しています。
-- `azd pipeline config` は、azd 1.37.3 ではベータ版の機能です。実行には、Entra ID にアプリを登録できる権限と、サブスクリプションでロールを割り当てられる権限 (Owner など) が必要です。
-- サービス プリンシパルの権限 (既定では、サブスクリプションの `Contributor` と `User Access Administrator`) は強いため、運用では、スコープの絞り込みを検討してください。
-- 初回のデプロイでは、ACR にイメージが無いため、仮のイメージで起動します (「[実環境で確認が必要な点](#実環境で確認が必要な点)」の 4)。`azd provision` が失敗すると、`azd deploy` には進みません。
-- `AcrPull` の割り当ての反映待ち (「[azd で実環境での確認が必要な点](#azd-で実環境での確認が必要な点)」)。
-- ワークフローで使うアクション (`actions/checkout@v7`、`actions/setup-java@v6`、`Azure/setup-azd@v2`) のバージョンは、作成時点の最新のメジャー バージョンです。
 
 ## 参考: Azure CLI で 1 つの環境にデプロイする
 
@@ -678,13 +592,9 @@ az containerapp create \
 | `azd package --all` | 成功 (ビルドは `azd deploy` のときに ACR Tasks で行うため、ローカルでのビルドはなし) |
 | `azure.yaml` の JSON スキーマ検証 | エラーなし |
 | `docker.io` と `Docker Hub` の検索 (`infra/`、`azure.yaml`、`.github/`、Dockerfile) | コンテナー アプリのイメージとしての参照は無し (説明とコメントだけ) |
-| `actionlint` (`.github/workflows/azure-dev.yml`) | エラーなし |
-| ワークフローの「Load deployment secrets」手順をローカルで実行 | 必須シークレットの不足や値の改行はエラー、値のあるデプロイ設定だけを出力 |
 | `AZURE_NAME_SUFFIX` を空にして `azd provision --preview` | `nameSuffix` が 3 文字未満というエラー (空の変数を渡してはいけない根拠) |
 | Bicep の実デプロイ、Private Endpoint 経由の TCP 疎通 | 未実施 (「実環境で確認が必要な点」を参照) |
 | `azd up` / `azd deploy` / `azd down`、ACR への push と ACR からの pull | 未実施 (「azd で実環境での確認が必要な点」を参照) |
-| シークレット移行前の GitHub Actions での実行 (`main` への push。リポジトリ変数は未設定) | `test` ジョブ (Java 25、`mvn -B -ntp verify`) は成功。`deploy` ジョブは `Load repository variables` で、必須の 5 変数が無いというエラーを出して停止 (想定どおり。Azure には接続せず、以降の手順はスキップ)。シークレットを使う構成は GitHub 上では未実行 |
-| `azd pipeline config`、フェデレーション資格情報での `azd auth login`、ワークフローからの `azd provision` / `azd deploy` | 未実施 (「自動デプロイで実環境での確認が必要な点」を参照) |
 | ACA 環境へのデプロイ (`az containerapp`) | 未実施 |
 
 ## 補足

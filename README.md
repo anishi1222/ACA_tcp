@@ -23,7 +23,6 @@ App A uses only JDK standard libraries and virtual threads. App B uses Micronaut
 ├── app-a/           Container app A (Dockerfile: EXPOSE 18192 28192 38192)
 ├── app-b/           Container app B (Dockerfile: EXPOSE 8080)
 ├── azure.yaml       Azure Developer CLI (azd) definition (services app-a / app-b)
-├── .github/         GitHub Actions workflow for automatic deployment (workflows/azure-dev.yml)
 └── infra/           Bicep for Azure Container Apps (main.bicep, modules/, main.parameters.json for azd, main.sample.bicepparam for az)
 ```
 
@@ -374,7 +373,7 @@ The following items are not documented in Microsoft Learn and need a proof of co
 
 ## Deploy with Azure Developer CLI (azd)
 
-The [Azure Developer CLI (azd)](https://learn.microsoft.com/azure/developer/azure-developer-cli/overview) can provision with Bicep, build and push images to ACR, and deploy to Container Apps (which pulls from ACR) with a single `azd up` command. You can also configure automatic deployment with GitHub Actions using `azd pipeline config` (see [Automatic deployment (GitHub Actions)](#automatic-deployment-github-actions)). Verified with azd 1.37.3.
+The [Azure Developer CLI (azd)](https://learn.microsoft.com/azure/developer/azure-developer-cli/overview) can provision with Bicep, build and push images to ACR, and deploy to Container Apps (which pulls from ACR) with a single `azd up` command. Run the commands below manually; this repository does not include GitHub Actions workflows. Verified with azd 1.37.3.
 
 > **A live deployment with `azd up` has not been performed.** Checks so far include `azd provision --preview` (including name overrides), `azd package` and schema validation for `azure.yaml`; all completed without errors. Items that need a live check are listed at the end of this section.
 
@@ -389,7 +388,6 @@ The [Azure Developer CLI (azd)](https://learn.microsoft.com/azure/developer/azur
 | 3 | `azd deploy` (build images) | Sends the source to ACR Tasks and builds each app with its Dockerfile (including Maven inside the container). Docker / Podman is not needed locally |
 | 4 | `azd deploy` (push to ACR) | Stores the built images in ACR (repository `acatcp/<service name>-<azd environment name>`, tag `azd-deploy-<UNIX time>`) |
 | 5 | `azd deploy` (deploy to Container Apps) | Switches the apps to the ACR images and creates new revisions. The apps pull from ACR using the managed identity (`AcrPull`) |
-| 6 | `azd pipeline config` (once) | Configures automatic deployment with GitHub Actions. Later, a push to `main` runs steps 2-5 automatically |
 
 Provisioning (step 2) happens before the build because it creates the ACR that will store the images. Steps 3-5, from building through deployment to Container Apps, run together inside `azd deploy`.
 
@@ -402,7 +400,6 @@ Provisioning (step 2) happens before the build because it creates the ACR that w
 | `infra/main.parameters.json` | Passes azd environment values (`AZURE_ENV_NAME`, `AZURE_LOCATION`, etc.) to Bicep parameters (see table below) |
 | `infra/modules/registry.bicep` | ACR, user-assigned managed identity and `AcrPull` role assignment |
 | `infra/modules/existing-container-image.bicep` | Module to keep the deployed image during reprovisioning |
-| `.github/workflows/azure-dev.yml` | Automatic deployment workflow (see [Automatic deployment (GitHub Actions)](#automatic-deployment-github-actions)) |
 
 `infra/main.sample.bicepparam` is an example for `az deployment sub create`, not azd. It is named this way because azd does not read `main.parameters.json` when `main.bicepparam` exists.
 
@@ -413,7 +410,6 @@ Provisioning (step 2) happens before the build because it creates the ACR that w
 | `azd provision` | Deploys `infra/main.bicep`. app-a / app-b start with the bootstrap image (`bootstrapImage`) |
 | `azd deploy` | Builds app-a / app-b with ACR Tasks, pushes them to ACR, switches the container apps to the ACR images and creates new revisions |
 | `azd up` | Runs `azd package`, `azd provision` and `azd deploy` in order |
-| `azd pipeline config` | Configures automatic deployment with GitHub Actions (see [Automatic deployment (GitHub Actions)](#automatic-deployment-github-actions)) |
 | `azd provision --preview` | Shows the planned changes without creating resources |
 | `azd down` | Deletes the resource group. Add `--purge` to permanently delete soft-deleted resources such as the Log Analytics workspace |
 
@@ -425,7 +421,6 @@ After `azd deploy`, running `azd provision` again keeps the ACR images. azd auto
 - Sign in to Azure (`azd auth login`).
 - Permissions and resource providers are the same as the Bicep [prerequisites](#prerequisites-1): Owner, or both Contributor and User Access Administrator.
 - Local Docker / Podman is not needed (images are built with ACR Tasks).
-- To configure automatic deployment, install GitHub CLI (`gh`) and use a GitHub repository.
 
 ### Usage
 
@@ -481,6 +476,7 @@ For VNet address spaces (`appAVnetAddressPrefix` / `appBVnetAddressPrefix`) and 
 
 - **Do not change the region later**: You cannot change the region of an environment (VNet, etc.) after it is created. To change it, create a new azd environment (`azd env new`).
 - **ACR cost**: Basic ACR is billed daily even when unused. Delete it with `azd down` when it is no longer needed.
+- **ACR images accumulate**: Each deployment leaves a new image tag (`azd-deploy-<UNIX time>`) in ACR. Remove old images with `az acr repository delete` or a similar command.
 - **Bootstrap image**: The first `azd provision` creates apps with the public Microsoft Container Registry image (`bootstrapImage`) because ACR does not yet contain the app images. It is no longer needed after `azd deploy` switches to the ACR images.
 - **Building locally**: Set `remoteBuild` to `false` in `azure.yaml` (Docker or Podman is required). `azd package` builds the images, and `azd deploy` pushes them to ACR. azd builds with `linux/amd64`; on Apple Silicon Macs, emulation makes the build slower.
 - **app-a endpoint display**: azd displays the deployed container app endpoint as `https://<FQDN>/`. Since app-a uses TCP ingress inside the VNet, it cannot be reached using that URL (this is only a display issue).
@@ -495,88 +491,6 @@ For VNet address spaces (`appAVnetAddressPrefix` / `appBVnetAddressPrefix`) and 
 - Propagation time for the `AcrPull` assignment. Since `azd deploy` runs right after `azd provision`, the pull may fail temporarily if the assignment has not propagated (rerun `azd deploy` if this happens).
 - Whether reprovisioning (`SERVICE_*_RESOURCE_EXISTS` is `true`) keeps the deployed image. Only Bicep compilation and `validate` have been checked.
 - TCP `18192` connectivity and name resolution through the Private Endpoint, listed under [Items to verify in a live environment](#items-to-verify-in-a-live-environment).
-- Automatic deployment (see [Items to verify for automatic deployment in a live environment](#items-to-verify-for-automatic-deployment-in-a-live-environment)).
-
-## Automatic deployment (GitHub Actions)
-
-`.github/workflows/azure-dev.yml` runs tests, provisioning, image builds, pushes to ACR and deployments to Container Apps (which pull from ACR) automatically when changes are pushed to `main`. Builds run with ACR Tasks, so Docker is not needed on the runner. Deployment settings are read from GitHub Actions repository secrets. Azure sign-in still uses OpenID Connect (federated credentials); no client secret is needed.
-
-| Trigger | What runs |
-| --- | --- |
-| Push to `main` that changes `app-a/`, `app-b/`, `infra/`, `azure.yaml`, `pom.xml` or the workflow itself | Tests → `azd provision` → `azd deploy` |
-| Pull request to `main` that changes `app-a/`, `app-b/` or `pom.xml` | Tests only (does not access Azure) |
-| Manual run (`workflow_dispatch`) | On `main`, deploys as for a push; on other branches, runs tests only |
-
-The steps run in this order. Deployments run one at a time to avoid concurrent deployments to the same environment.
-
-1. `test` job: runs `mvn -B -ntp verify` with Java 25 (Temurin).
-2. `deploy` job (only after `test` succeeds, and only on `main`): loads deployment secrets (`AZURE_*`). It reports an error if required secrets are missing.
-3. Signs in to Azure with `azd auth login` using federated credentials.
-4. `azd provision --no-prompt`: applies the contents of `infra/`. Existing apps keep their current (ACR) images.
-5. `azd deploy --no-prompt`: builds with ACR Tasks, pushes to ACR and creates new revisions in Container Apps (the apps pull from ACR with the managed identity).
-
-### Enable it (once)
-
-After pushing this repository to GitHub, run the following locally:
-
-```bash
-gh auth login
-azd auth login
-
-# Create an azd environment if needed (to set names, run azd env set as described in "Set names and other values" first)
-azd env new acatcp-dev --location japaneast
-
-# Create the Azure identity (service principal and federated credentials) and GitHub repository variables
-azd pipeline config
-
-# Copy the corresponding values from Actions > Variables into repository secrets (interactive prompts)
-gh secret set AZURE_CLIENT_ID
-gh secret set AZURE_TENANT_ID
-gh secret set AZURE_SUBSCRIPTION_ID
-gh secret set AZURE_ENV_NAME
-gh secret set AZURE_LOCATION
-```
-
-Based on the azd 1.37.3 source, `azd pipeline config` does the following (it has not been run):
-
-- Registers an app (service principal) in Microsoft Entra ID and, by default, assigns the `Contributor` and `User Access Administrator` roles at subscription scope. `User Access Administrator` is needed for Bicep to create the `AcrPull` role assignment. To limit permissions, specify roles with `--principal-role`; permission to write role assignments is still required.
-- Creates federated credentials for pull requests, the current branch and `main`.
-- Sets GitHub repository variables. This workflow does not read them; copy their values into the corresponding repository secrets as shown above.
-- Does not generate a workflow because `.github/workflows/azure-dev.yml` already exists.
-
-Register the required secrets before pushing the workflow to `main`. Once a commit containing the workflow is on `main`, a push to `main` starts automatic deployment (`azd pipeline config` may offer to commit and push).
-
-### Repository secrets
-
-Register these under Settings → Secrets and variables → Actions → Secrets → New repository secret, or use `gh secret set <name>` to enter a value interactively. `azd pipeline config` creates variables, not secrets, so an existing Variables entry alone is not sufficient.
-
-| Secret | Description |
-| --- | --- |
-| `AZURE_CLIENT_ID` (required) | Client ID of the created service principal |
-| `AZURE_TENANT_ID` (required) | Entra tenant ID |
-| `AZURE_SUBSCRIPTION_ID` (required) | Target subscription |
-| `AZURE_ENV_NAME` (required) | azd environment name |
-| `AZURE_LOCATION` (required) | Region |
-| `AZURE_RESOURCE_GROUP`, `AZURE_APP_A_VNET_NAME`, etc. (optional) | Register the environment variables from [Set names and other values](#set-names-and-other-values) as same-named secrets only when overriding a default. Unset values use the defaults (names that look random) |
-
-If any of the five required secrets is missing, `Load deployment secrets` stops with an error naming the missing secret before signing in to Azure. Existing repository variables are not used as a fallback.
-
-The workflow explicitly references only the deployment secrets listed in `azure-dev.yml`, not all repository secrets. It passes only non-empty values to azd and rejects values containing line breaks. An empty value would override the Bicep default instead of using it (`azd provision --preview` with an empty `AZURE_NAME_SUFFIX` failed because `nameSuffix` must have at least three characters). To change a value later, use `gh secret set <name>`, but changing resource names after the first provision creates different resources. If you add a new deployment setting, also add its secret reference to the workflow.
-
-### Notes (automatic deployment)
-
-- **Only `main` deploys**: The `deploy` job runs only on `main`. To deploy from another branch, create federated credentials for that branch (run `azd pipeline config` on it) and change the workflow's `if:` condition.
-- **Do not use this with Azure portal "Continuous Deployment"**: A GitHub Actions workflow generated by Container Apps "Continuous Deployment" updates the same app through a separate path. This repository does not include portal-generated workflows. If you disable the portal setting and delete its workflow, the repository secrets (`APPA_*`, `APPB_*`: client ID, tenant ID, subscription ID, registry username and password) remain. `azure-dev.yml` does not use these secrets, so delete them if they are no longer needed (`gh secret delete <name>`). As they include registry passwords, we recommend deleting them or regenerating the passwords.
-- **ACR images accumulate**: Each deployment leaves a new image tag (`azd-deploy-<UNIX time>`) in ACR. Remove old images with `az acr repository delete` or a similar command.
-
-### Items to verify for automatic deployment in a live environment
-
-- Running `azd pipeline config`, signing in to azd from GitHub Actions with federated credentials, and running `azd provision` / `azd deploy` from the workflow have not been done in this repository. The secrets-based workflow still needs a GitHub Actions run. Before the secrets migration, a GitHub run reached the missing-variable check after the `test` job succeeded.
-- `azd pipeline config` is a beta feature in azd 1.37.3. It needs permission to register an app in Entra ID and assign roles in the subscription (for example, Owner).
-- The service principal's default subscription roles (`Contributor` and `User Access Administrator`) are broad. Consider limiting the scope for production use.
-- On the first deployment, the apps start with the bootstrap image because ACR has no app images yet (see item 4 under [Items to verify in a live environment](#items-to-verify-in-a-live-environment)). If `azd provision` fails, `azd deploy` does not run.
-- Propagation time for the `AcrPull` assignment (see [Items to verify with azd in a live environment](#items-to-verify-with-azd-in-a-live-environment)).
-- The action versions used by the workflow (`actions/checkout@v7`, `actions/setup-java@v6`, `Azure/setup-azd@v2`) are the latest major versions at the time of writing.
 
 ## Reference: deploy to one environment with Azure CLI
 
@@ -678,13 +592,9 @@ After deployment, call `https://<app B FQDN>/api/tcp?port=28192`. HTTP ingress t
 | `azd package --all` | Succeeded (no local build; ACR Tasks builds during `azd deploy`) |
 | JSON schema validation for `azure.yaml` | No errors |
 | Search for `docker.io` and `Docker Hub` in `infra/`, `azure.yaml`, `.github/` and Dockerfiles | No container app image references (only explanatory text and comments) |
-| `actionlint` (`.github/workflows/azure-dev.yml`) | No errors |
-| Run the workflow's "Load deployment secrets" step locally | Errors when required secrets are missing or values contain line breaks; exports only configured, non-empty deployment settings |
 | `azd provision --preview` with an empty `AZURE_NAME_SUFFIX` | Error because `nameSuffix` must be at least three characters (evidence that an empty value must not be passed) |
 | Live Bicep deployment and TCP connectivity through the Private Endpoint | Not done (see [Items to verify in a live environment](#items-to-verify-in-a-live-environment)) |
 | `azd up` / `azd deploy` / `azd down`, ACR push and ACR pull | Not done (see [Items to verify with azd in a live environment](#items-to-verify-with-azd-in-a-live-environment)) |
-| GitHub Actions run before the secrets migration (push to `main`, repository variables unset) | The `test` job (Java 25, `mvn -B -ntp verify`) succeeded. The `deploy` job stopped at `Load repository variables` because the five required variables were missing (expected; no Azure connection was made and later steps were skipped). The secrets-based workflow has not been run on GitHub yet |
-| `azd pipeline config`, `azd auth login` with federated credentials, and workflow `azd provision` / `azd deploy` | Not done (see [Items to verify for automatic deployment in a live environment](#items-to-verify-for-automatic-deployment-in-a-live-environment)) |
 | Deployment to an ACA environment (`az containerapp`) | Not done |
 
 ## Notes
